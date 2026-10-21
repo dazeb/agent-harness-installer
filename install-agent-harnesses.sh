@@ -34,6 +34,7 @@
 #   ./install-agent-harnesses.sh --fix-path      persist PATH to profile
 #   ./install-agent-harnesses.sh --verbose       print installer logs
 #   ./install-agent-harnesses.sh --dry-run       show the plan only
+#   ./install-agent-harnesses.sh --backend mise  let mise own versions (opt-in)
 #   ./install-agent-harnesses.sh --help
 #
 # Exit codes: 0 all requested harnesses installed+verified, 1 otherwise, 2 usage.
@@ -92,6 +93,18 @@ declare -A TOOL_ENV=(
     [pi]="ANTHROPIC_API_KEY OPENAI_API_KEY GEMINI_API_KEY OPENROUTER_API_KEY"
 )
 
+# mise specs for --backend mise. Short names resolve through mise's registry
+# (aqua where available, npm otherwise); amp is npm-only and its short name
+# cannot list versions (`mise ls-remote amp` is empty), so it is spelled out.
+declare -A MISE_SPEC=(
+    [claude]=claude                    # aqua:anthropics/claude-code
+    [codex]=codex                      # aqua:openai/codex
+    [opencode]=opencode                # aqua:anomalyco/opencode
+    [gemini]=gemini                    # npm:@google/gemini-cli
+    [amp]="npm:@ampcode/cli"           # same tarball as @sourcegraph/amp
+    [pi]=pi                            # aqua:earendil-works/pi
+)
+
 
 declare -A STATUS=()   # ok | planned | failed | skipped
 declare -A VERSION=()  # version string reported by --version
@@ -101,6 +114,7 @@ UPGRADE=0
 CHECK_ONLY=0
 DRY_RUN=0
 FIX_PATH=0
+BACKEND="vendor"   # vendor | mise
 VERBOSE="${VERBOSE:-}"
 ONLY=""
 SKIP=""
@@ -126,7 +140,7 @@ skipmsg() { printf '    %s[skip]%s %s\n' "$C_DIM" "$C_RESET" "$*"; }
 warn()    { printf '    %s[warn]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 failmsg() { printf '    %s[fail]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
 
-usage() { sed -n '28,39p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '28,38p' "$0" | sed 's/^# \{0,1\}//'; }
 
 # ---------------------------------------------------------------------------
 # Small utilities
@@ -380,6 +394,59 @@ install_pi() {
 }
 
 # ---------------------------------------------------------------------------
+# mise backend (--backend mise) — opt-in
+# ---------------------------------------------------------------------------
+# When selected, mise owns the version (in ~/.config/mise/config.toml), fetches
+# verified artifacts (aqua = signed GitHub releases) and gives one upgrade path
+# (`mise upgrade`). It is NOT the default: a bare headless box may have no mise,
+# and the vendor installers are the officially supported path per harness.
+
+mise_which() {
+    # Resolved binary path. stderr is dropped: mise prints update notices there
+    # and they would otherwise be captured as output.
+    local bin=$1 p
+    p=$(timeout 60 mise which "$bin" 2>/dev/null | tail -n1)
+    [ -n "$p" ] && [ -x "$p" ] && printf '%s' "$p"
+}
+
+install_via_mise() {
+    local tool=$1 spec=${MISE_SPEC[$1]} log rc
+    mkdir -p "$LOG_DIR"
+    log="$LOG_DIR/mise-$tool.log"
+
+    if ! have mise; then
+        failmsg "mise is not installed (curl https://mise.run | sh), or drop --backend mise"
+        return 1
+    fi
+    # mise's npm backend shells out to a Node runtime and never adds one itself.
+    if [ "$tool" = "gemini" ] && [ -z "$(node_version)" ]; then
+        failmsg "gemini via mise needs Node for the npm backend (mise use -g node@lts)"
+        return 1
+    fi
+
+    # Idempotent: re-running with @latest upgrades, and pins stay editable in
+    # config.toml afterwards (mise use -g codex@0.160.0 to roll back).
+    info "mise use -g $spec@latest"
+    run_detached "$log" mise use -g "$spec@latest"
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+        failmsg "mise failed for $tool (log: $log)"
+        show_log_tail "$log"
+        return 1
+    fi
+    METHOD[$tool]="mise ($spec)"
+}
+
+# backend_install TOOL — dispatch on --backend.
+backend_install() {
+    if [ "$BACKEND" = "mise" ]; then
+        install_via_mise "$1"
+    else
+        "install_$1"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Verification
 # ---------------------------------------------------------------------------
 
@@ -406,12 +473,28 @@ verify_bin() {
 
 # installed_ok TOOL — binary present AND actually starts.
 installed_ok() {
-    local tool=$1 bin=${TOOL_BIN[$1]}
-    have "$bin" || return 1
+    local tool=$1 bin=${TOOL_BIN[$1]} cmd
+    cmd=$bin
+    if ! have "$bin"; then
+        # --backend mise installs outside the normal PATH dirs; ask mise where
+        # the binary is instead of requiring `mise activate` in this shell.
+        [ "$BACKEND" = "mise" ] || return 1
+        cmd=$(mise_which "$bin") || return 1
+    fi
     case "$tool" in
-        claude)   timeout 120 claude --version </dev/null >/dev/null 2>&1 ;;
-        *)        timeout 60 "$bin" --version </dev/null >/dev/null 2>&1 ;;
+        claude)   timeout 120 "$cmd" --version </dev/null >/dev/null 2>&1 ;;
+        *)        timeout 60 "$cmd" --version </dev/null >/dev/null 2>&1 ;;
     esac
+}
+
+# resolve_cmd TOOL — command used for verification. Under --backend mise the
+# binary may live outside our PATH dirs, so ask mise before using the bare name.
+resolve_cmd() {
+    local bin=${TOOL_BIN[$1]}
+    if ! have "$bin" && [ "$BACKEND" = "mise" ]; then
+        mise_which "$bin" && return 0
+    fi
+    printf '%s' "$bin"
 }
 
 is_selected() {
@@ -446,24 +529,28 @@ ensure_bin_dir() { [ -d "$HOME/.local/bin" ] || mkdir -p "$HOME/.local/bin"; }
 # Export a deduped PATH with the harness dirs first. Assignment is split from
 # the export to keep the tool's return value (and linters) happy.
 refresh_path() {
-    local p
+    local p mp
     p=$(build_path)
+    if [ "$BACKEND" = "mise" ] && have mise; then
+        # bin dirs of the tools mise currently resolves — works without shims.
+        mp=$(mise bin-paths 2>/dev/null | awk 'NF { printf "%s%s", sep, $0; sep = ":" }')
+        [ -n "$mp" ] && p="$mp${p:+:$p}"
+    fi
     export PATH="$p"
 }
 
 persist_path() {
-    local targets=("$HOME/.profile") t
+    local targets=("$HOME/.profile") t shellname=bash
     # zsh login shells read .zprofile, not .profile.
     if [ -n "${ZSH_VERSION:-}" ] || [ "$(basename "${SHELL:-}")" = "zsh" ]; then
         targets+=("${ZDOTDIR:-$HOME}/.zprofile")
     fi
     for t in "${targets[@]}"; do
-        if [ -f "$t" ] && grep -qF '# >>> agent-harnesses PATH >>>' "$t"; then
-            info "$t already patched"
-            continue
-        fi
         mkdir -p "$(dirname "$t")"
-        cat >>"$t" <<'EOF'
+        if [ -f "$t" ] && grep -qF '# >>> agent-harnesses PATH >>>' "$t"; then
+            info "$t already has the PATH block"
+        else
+            cat >>"$t" <<'EOF'
 
 # >>> agent-harnesses PATH >>>
 # Added by install-agent-harnesses.sh — keeps user-space agent CLIs on PATH.
@@ -477,7 +564,23 @@ export PATH
 unset _ah_dir
 # <<< agent-harnesses PATH <<<
 EOF
-        ok "patched $t"
+            ok "patched $t (PATH)"
+        fi
+
+        # mise installs outside those dirs, so shell activation is what makes
+        # its bin dirs reachable in future shells.
+        if [ "$BACKEND" = "mise" ] && ! grep -qF '# >>> agent-harnesses mise >>>' "$t" 2>/dev/null; then
+            shellname=bash
+            case "$t" in *.zprofile) shellname=zsh ;; esac
+            cat >>"$t" <<EOF
+
+# >>> agent-harnesses mise >>>
+# Added by install-agent-harnesses.sh --backend mise
+command -v mise >/dev/null 2>&1 && eval "\$(mise activate $shellname)"
+# <<< agent-harnesses mise <<<
+EOF
+            ok "patched $t (mise activate $shellname)"
+        fi
     done
     info "open shells still need: export PATH=\"\$HOME/.local/bin:\$PATH\""
 }
@@ -616,6 +719,8 @@ main() {
             --only=*)     ONLY="${1#*=}" ;;
             --skip)       SKIP="${2:-}"; shift ;;
             --skip=*)     SKIP="${1#*=}" ;;
+            --backend)    BACKEND="${2:-}"; shift ;;
+            --backend=*)  BACKEND="${1#*=}" ;;
             -h|--help)    usage; exit 0 ;;
             *)            failmsg "unknown option: $1 (try --help)"; exit 2 ;;
         esac
@@ -624,6 +729,11 @@ main() {
 
     ONLY=$(printf '%s' "$ONLY" | tr ' ' ',')
     SKIP=$(printf '%s' "$SKIP" | tr ' ' ',')
+
+    case "$BACKEND" in
+        vendor|mise) ;;
+        *) failmsg "--backend must be 'vendor' or 'mise' (got: ${BACKEND:-empty})"; exit 2 ;;
+    esac
 
     # Reject typos instead of silently doing nothing.
     if [ -n "$ONLY" ]; then
@@ -642,6 +752,7 @@ main() {
     info "user:    $(id -un) (uid $(id -u), shell ${SHELL:-unknown})"
     info "node:    $(node_version || true)"
     info "npm:     $(npm -v 2>/dev/null || echo missing)"
+    info "backend: $BACKEND"
     info "log dir: $LOG_DIR"
 
     if [ "$(id -u)" -eq 0 ]; then
@@ -677,12 +788,16 @@ main() {
 
         if installed_ok "$tool"; then
             if [ "$UPGRADE" -eq 0 ]; then
-                VERSION[$tool]=$(verify_bin "$bin" || printf 'installed')
+                VERSION[$tool]=$(verify_bin "$(resolve_cmd "$tool")" || printf 'installed')
                 ok "$bin — ${VERSION[$tool]} (already installed; --upgrade to refresh)"
                 STATUS[$tool]="ok"
                 continue
             fi
-            info "upgrading: re-running the upstream installer"
+            if [ "$BACKEND" = "mise" ]; then
+                info "upgrading: re-resolving @latest through mise"
+            else
+                info "upgrading: re-running the upstream installer"
+            fi
         elif have "$bin"; then
             warn "$bin exists at $(command -v "$bin") but does not answer --version; reinstalling"
         else
@@ -697,7 +812,11 @@ main() {
         fi
 
         if [ "$DRY_RUN" -eq 1 ]; then
-            info "would run install_${tool}"
+            if [ "$BACKEND" = "mise" ]; then
+                info "would run: mise use -g ${MISE_SPEC[$tool]}@latest"
+            else
+                info "would run install_${tool}"
+            fi
             STATUS[$tool]="planned"
             continue
         fi
@@ -706,7 +825,7 @@ main() {
         prune_dangling "$HOME/.local/bin/$bin"
         prune_dangling "$HOME/bin/$bin"
 
-        "install_${tool}"
+        backend_install "$tool"
         rc=$?
         if [ "$rc" -ne 0 ]; then
             STATUS[$tool]="failed"
@@ -717,7 +836,7 @@ main() {
         hash -r 2>/dev/null || true
         refresh_path
         if installed_ok "$tool"; then
-            VERSION[$tool]=$(verify_bin "$bin" || printf 'installed')
+            VERSION[$tool]=$(verify_bin "$(resolve_cmd "$tool")" || printf 'installed')
             ok "$bin — ${VERSION[$tool]}  [${METHOD[$tool]:-installed}]"
             STATUS[$tool]="ok"
         else

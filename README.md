@@ -32,6 +32,59 @@ The vendor installer is always preferred; npm is the documented fallback and is 
 vendor path fails. Verification is a real `--version` call under `timeout` — a zero exit code from
 an installer is not trusted on its own.
 
+Passing `--backend mise` swaps the whole table for [mise](https://mise.jdx.dev/) specs instead (see
+[Version management](#version-management-vendor-installers-or-mise)).
+
+## Version management: vendor installers or mise
+
+Default (`--backend vendor`): each harness is installed by its own vendor installer with npm as
+fallback — the path each vendor supports, and the one that keeps self-updating.
+
+If the machine already runs [mise](https://mise.jdx.dev/), you can hand version ownership to it:
+
+```bash
+./install-agent-harnesses.sh --backend mise            # install/repair through mise
+./install-agent-harnesses.sh --backend mise --check    # verify, touch nothing
+./install-agent-harnesses.sh --backend mise --upgrade  # re-resolve @latest for each tool
+```
+
+Each tool is written to the global `~/.config/mise/config.toml` with `mise use -g <spec>@latest`,
+and the result is verified through `mise which` — so nothing depends on `mise activate` being
+loaded in the current shell, and a shim that prints warnings on stderr cannot poison the version
+string. Specs come from mise's registry: aqua (signed GitHub releases) where available, npm
+otherwise.
+
+| Harness | mise spec | Backend | Notes |
+|---|---|---|---|
+| claude | `claude` | `aqua:anthropics/claude-code` | also `http:claude` |
+| codex | `codex` | `aqua:openai/codex` | npm backend exists too |
+| opencode | `opencode` | `aqua:anomalyco/opencode` | |
+| gemini | `gemini` | `npm:@google/gemini-cli` | npm backend needs Node on `PATH` |
+| amp | `npm:@ampcode/cli` | npm only | the `amp` short name cannot list versions (`mise ls-remote amp` is empty); the package is byte-identical to `@sourcegraph/amp` |
+| pi | `pi` | `aqua:earendil-works/pi` | also `github:` / npm |
+
+Why you might prefer it:
+
+- **Pin and roll back** — `mise use -g codex@0.160.0` is one line; the vendor installers only ever
+  give you "latest". `mise upgrade` then updates everything together, `mise ls -g` is the inventory.
+- **Verified artifacts** — aqua downloads checksummed/signed releases instead of piping an
+  `install.sh` into a shell.
+- **No sudo, no npm global prefix** — the same reason this script exists.
+
+What it costs:
+
+- mise becomes a dependency (`curl https://mise.run | sh`, or apt/brew): a bare box that has none
+  fails fast with that hint rather than silently falling back.
+- the npm backend shells out to Node, so Gemini needs a Node runtime in mise's resolution too.
+- the registry can lag a vendor release, and `ls-remote` is blind for npm-only names like Amp.
+
+**Do not run both.** Two owners per command name is how a box ends up with `codex` 0.163.0 on
+`PATH` while mise still pins 0.160.0 — exactly the drift `--check` surfaces. If you switch, delete
+the losing copy (`mise prune`, or the leftover `~/.local/bin` wrapper).
+
+`--fix-path` writes the block that matches your backend: the plain `PATH` entries for vendor
+installs, plus `mise activate bash` / `mise activate zsh` when `--backend mise` is in use.
+
 ## Quick start
 
 ```bash
@@ -59,6 +112,7 @@ non-zero exit code if anything failed.
 
   --check          report status only; never install   (exit 1 if something is missing)
   --dry-run        print what would be installed; change nothing
+  --backend NAME   vendor (default, each vendor's own installer) or mise
   --upgrade        re-run the upstream installer even if the tool already works
   --only TOOLS     restrict to a comma/space list: claude,codex,opencode,gemini,amp,pi
   --skip TOOLS     exclude a comma/space list
@@ -73,6 +127,7 @@ Examples:
 ./install-agent-harnesses.sh --only amp,pi         # install just two
 ./install-agent-harnesses.sh --skip gemini         # everything except Gemini
 ./install-agent-harnesses.sh --only codex --upgrade
+./install-agent-harnesses.sh --backend mise        # let mise own the versions
 ```
 
 Idempotent: tools that already answer `--version` are skipped (or upgraded with `--upgrade`).
@@ -165,16 +220,17 @@ Remove the `# >>> agent-harnesses PATH >>>` block from `~/.profile` / `~/.zprofi
 
 ```bash
 make lint      # bash -n + shellcheck --severity=warning
-make test      # lint, --help, --dry-run, unknown-tool rejection
+make test      # lint, --help, both --backends, unknown tool/backend rejection
 ```
 
 `make test` is the same gate as `.github/workflows/ci.yml`, so it can be run locally when hosted CI
-is unavailable. There is no build step and no runtime dependency beyond `bash` and `curl`/`wget`.
+is unavailable. There is no build step and no runtime dependency beyond `bash` and `curl`/`wget`
+(mise is only touched by `--backend mise`, and CI proves the dry-run path works without it).
 
-Adding a harness means four things: an entry in `TOOL_ORDER` / `TOOL_LABEL` / `TOOL_BIN`, its
-credential path in `TOOL_CREDS` (or env var in `TOOL_ENV`), an `install_<tool>()` function that
-prefers the vendor installer with an npm fallback, and a row in the table inside
-`print_auth_guide()`.
+Adding a harness means five things: an entry in `TOOL_ORDER` / `TOOL_LABEL` / `TOOL_BIN`, its
+credential path in `TOOL_CREDS` (or env var in `TOOL_ENV`), its `MISE_SPEC` (registry short name,
+or an explicit `npm:`/`aqua:` spec), an `install_<tool>()` function that prefers the vendor
+installer with an npm fallback, and a row in the table inside `print_auth_guide()`.
 
 ## License
 

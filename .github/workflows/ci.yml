@@ -30,10 +30,23 @@ jobs:
           ./install-agent-harnesses.sh --dry-run | tee dry.log
           grep -q 'dry run complete' dry.log
 
+      - name: --backend mise plans without mise installed
+        run: |
+          ./install-agent-harnesses.sh --dry-run --backend mise | tee dry-mise.log
+          grep -q 'backend: mise' dry-mise.log
+          grep -q 'dry run complete' dry-mise.log
+
       - name: Unknown tool name is rejected
         run: |
           if ./install-agent-harnesses.sh --only not-a-tool; then
             echo "expected a non-zero exit for an unknown tool name" >&2
+            exit 1
+          fi
+
+      - name: Unknown backend is rejected
+        run: |
+          if ./install-agent-harnesses.sh --backend not-a-backend; then
+            echo "expected a non-zero exit for an unknown backend" >&2
             exit 1
           fi
 
