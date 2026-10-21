@@ -219,18 +219,68 @@ Remove the `# >>> agent-harnesses PATH >>>` block from `~/.profile` / `~/.zprofi
 ## Development
 
 ```bash
-make lint      # bash -n + shellcheck --severity=warning
+make lint      # bash -n + shellcheck --severity=warning (all scripts)
 make test      # lint, --help, both --backends, unknown tool/backend rejection
+make gate      # = ./ci/gate.sh — the canonical gate, used by CI and by ci/run-gate.sh
 ```
 
-`make test` is the same gate as `.github/workflows/ci.yml`, so it can be run locally when hosted CI
-is unavailable. There is no build step and no runtime dependency beyond `bash` and `curl`/`wget`
-(mise is only touched by `--backend mise`, and CI proves the dry-run path works without it).
+`ci/gate.sh` is the single source of truth: `.github/workflows/ci.yml` is a thin job that runs it, and
+`ci/run-gate.sh` runs the same file on a VM when GitHub cannot schedule jobs. It also works on a box
+where nothing is installed — the dry runs execute with a scrubbed `HOME`/`PATH`, so the plan is the
+same there as on a fully provisioned laptop. There is no build step and no runtime dependency beyond
+`bash` and `curl`/`wget` (mise is only touched by `--backend mise`, and the gate proves the
+`--backend mise` plan works with no mise on the box at all).
 
 Adding a harness means five things: an entry in `TOOL_ORDER` / `TOOL_LABEL` / `TOOL_BIN`, its
 credential path in `TOOL_CREDS` (or env var in `TOOL_ENV`), its `MISE_SPEC` (registry short name,
 or an explicit `npm:`/`aqua:` spec), an `install_<tool>()` function that prefers the vendor
 installer with an npm fallback, and a row in the table inside `print_auth_guide()`.
+
+## CI when GitHub Actions is unavailable
+
+Sometimes the workflow is valid, the repo says Actions is enabled, registration tokens are still
+issued — and nothing ever runs: every dispatch answers `HTTP 422: Actions has been disabled for this
+user`. **A self-hosted runner does not fix that.** The runner only executes jobs; if GitHub refuses to
+create the workflow run, there is no job to hand out, so the runner sits idle forever.
+
+What is *not* part of Actions is the commit status API, and that is enough to keep a real gate:
+
+```bash
+./ci/gate.sh                     # the assertions from ci.yml, no make, no Actions
+./ci/run-gate.sh --once          # fetch main -> gate in a container -> post a commit status
+./ci/run-gate.sh --loop 300      # poll every 5 minutes instead of using systemd
+```
+
+`ci/gate.sh` is the shared payload: `bash -n`, `shellcheck --severity=warning`, `--help`, both
+`--dry-run --backend {vendor,mise}` plans, and the two usage-error rejections. `.github/workflows/ci.yml`
+and `ci/run-gate.sh` both end up running it, so the verdict is identical either way.
+
+`ci/run-gate.sh` is the runner stand-in. It keeps a mirror clone, gates `origin/main`'s SHA in the
+`ci/Dockerfile` image (so the box needs no `shellcheck` of its own), and posts `pending` → `success`
+/`failure` under the context `ah-gate`. The commit page shows a check dot and the badge works:
+
+```markdown
+![gate](https://img.shields.io/github/commit-status/dazeb/agent-harness-installer/main/ah-gate)
+```
+
+Setup on any box with docker (Debian/Ubuntu shown; 4 cores / 2 GB is plenty — the gate is bash):
+
+```bash
+sudo install -d /usr/local/lib/ah-gate /var/lib/ah-gate /var/log/ah-gate
+sudo install -m 755 ci/run-gate.sh /usr/local/bin/ah-gate
+sudo install -m 644 ci/Dockerfile /usr/local/lib/ah-gate/Dockerfile
+sudo install -m 600 deploy/ah-gate.env.example /etc/ah-gate.env   # then edit: add AH_GATE_TOKEN
+sudo install -m 644 deploy/ah-gate.service deploy/ah-gate.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now ah-gate.timer
+journalctl -u ah-gate.service -n 20      # first run builds the image, then gates HEAD
+```
+
+`AH_GATE_TOKEN` is a classic PAT with `repo` (or a fine-grained token with *Commit statuses: write*).
+Without it the gate still runs and logs `PASS`/`FAIL` — you just lose the public status. Keep
+`ci.yml` in the repo: the day Actions is usable again, delete the timer and nothing else changes.
+
+Alternative if you want a CI *UI* rather than a status: mirror the repo to a forge you control
+(Gitea/Forgejo) and run `act_runner` there. That is a separate CI system, not a GitHub workaround.
 
 ## License
 

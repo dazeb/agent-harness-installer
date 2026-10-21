@@ -1,0 +1,17 @@
+[Unit]
+Description=agent-harness-installer CI gate (self-hosted stand-in for GitHub Actions)
+Documentation=https://github.com/dazeb/agent-harness-installer
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/ah-gate.env
+ExecStart=/usr/local/bin/ah-gate --once
+TimeoutStartSec=900
+Nice=10
+# The gate only needs the repo mirror, docker and its own state dir.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/ah-gate /var/log/ah-gate
+PrivateTmp=yes
+NoNewPrivileges=yes

@@ -9,50 +9,15 @@ on:
 permissions:
   contents: read
 
+# The assertions live in ci/gate.sh so that the same payload can run where
+# Actions cannot schedule jobs (see ci/run-gate.sh). This job is deliberately
+# thin: no duplicated steps, no drift between the two environments.
 jobs:
-  lint:
-    name: lint and smoke test
+  gate:
+    name: ci/gate.sh
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      - name: Bash syntax
-        run: bash -n install-agent-harnesses.sh
-
-      - name: ShellCheck (warnings are failures)
-        run: shellcheck --severity=warning --format=gcc install-agent-harnesses.sh
-
-      - name: --help works
-        run: ./install-agent-harnesses.sh --help
-
-      - name: --dry-run plans without installing
-        run: |
-          ./install-agent-harnesses.sh --dry-run | tee dry.log
-          grep -q 'dry run complete' dry.log
-
-      - name: --backend mise plans without mise installed
-        run: |
-          ./install-agent-harnesses.sh --dry-run --backend mise | tee dry-mise.log
-          grep -q 'backend: mise' dry-mise.log
-          grep -q 'dry run complete' dry-mise.log
-
-      - name: Unknown tool name is rejected
-        run: |
-          if ./install-agent-harnesses.sh --only not-a-tool; then
-            echo "expected a non-zero exit for an unknown tool name" >&2
-            exit 1
-          fi
-
-      - name: Unknown backend is rejected
-        run: |
-          if ./install-agent-harnesses.sh --backend not-a-backend; then
-            echo "expected a non-zero exit for an unknown backend" >&2
-            exit 1
-          fi
-
-      - name: Refuses to run as root
-        run: |
-          if sudo -E ./install-agent-harnesses.sh --check; then
-            echo "expected a non-zero exit when run as root" >&2
-            exit 1
-          fi
+      - name: Lint and smoke test
+        run: ./ci/gate.sh

@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the agent-harness-installer CI gate every 5 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Unit=ah-gate.service
+
+[Install]
+WantedBy=timers.target
