@@ -129,14 +129,21 @@ post_status() {
 
 run_gate() {
     local rc
+    # Run as ourselves so the mirror keeps its owner — but never as root:
+    # gate.sh refuses root, exactly like the installer. Under root (the systemd
+    # service) fall back to the image's own unprivileged user.
+    if [ "$(id -u)" -ne 0 ]; then
+        set -- --user "$(id -u):$(id -g)"
+    else
+        set --
+    fi
     mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR=/tmp
     LOG="$LOG_DIR/$SHORT.log"
     if [ "$DOCKER" = "none" ]; then
         # Escape hatch for a box without docker: needs bash + shellcheck there.
         "$SRC/ci/gate.sh" "$SRC" >"$LOG" 2>&1
     else
-        "$DOCKER" run --rm \
-            --user "$(id -u):$(id -g)" \
+        "$DOCKER" run --rm "$@" \
             -e HOME=/tmp \
             -v "$SRC:/src:ro" \
             "$IMAGE" >"$LOG" 2>&1
