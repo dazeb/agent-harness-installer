@@ -26,16 +26,24 @@
 #     token, or env var) instead of pretending a browser login will work.
 #
 # Usage:
-#   ./install-agent-harnesses.sh                 install whatever is missing
-#   ./install-agent-harnesses.sh --upgrade       re-run upstream installers
+#   ./install-agent-harnesses.sh                 interactive on a TTY, else install missing
+#   ./install-agent-harnesses.sh --interactive   force the picker (also when piped)
+#   ./install-agent-harnesses.sh --no-input      never prompt; keep the vendor default
+#   ./install-agent-harnesses.sh --backend mise  let mise own versions (non-interactive)
+#   ./install-agent-harnesses.sh --upgrade       re-run upstream installers / mise @latest
 #   ./install-agent-harnesses.sh --check         verify only, install nothing
 #   ./install-agent-harnesses.sh --only claude,pi
 #   ./install-agent-harnesses.sh --skip gemini
-#   ./install-agent-harnesses.sh --fix-path      persist PATH to profile
+#   ./install-agent-harnesses.sh --fix-path      persist PATH to profile (backed up)
+#   ./install-agent-harnesses.sh --restore       undo the edits of the last run
+#   ./install-agent-harnesses.sh --restore-list  show what --restore can undo
 #   ./install-agent-harnesses.sh --verbose       print installer logs
 #   ./install-agent-harnesses.sh --dry-run       show the plan only
-#   ./install-agent-harnesses.sh --backend mise  let mise own versions (opt-in)
 #   ./install-agent-harnesses.sh --help
+#
+# Every file this script edits (~/.profile, ~/.zprofile, mise's config.toml) is
+# copied to ~/.local/state/agent-harnesses/backups/<run>/ first and recorded in
+# manifest.tsv, so --restore puts the previous content back.
 #
 # Exit codes: 0 all requested harnesses installed+verified, 1 otherwise, 2 usage.
 #
@@ -109,17 +117,30 @@ declare -A MISE_SPEC=(
 declare -A STATUS=()   # ok | planned | failed | skipped
 declare -A VERSION=()  # version string reported by --version
 declare -A METHOD=()   # how it was installed
+declare -A BACKED_UP=() # files already copied this run (one backup per file)
 
 UPGRADE=0
 CHECK_ONLY=0
 DRY_RUN=0
 FIX_PATH=0
 BACKEND="vendor"   # vendor | mise
+BACKEND_SET=0      # 1 when --backend was given explicitly
+INTERACTIVE=0      # 1 when the picker should run
+NO_INPUT=0         # 1 when --no-input was given
+RESTORE=0          # 1 for --restore
+RESTORE_RUN=""     # optional run id for --restore=<run>
+RESTORE_LIST=0
 VERBOSE="${VERBOSE:-}"
 ONLY=""
 SKIP=""
 
 LOG_DIR="${TMPDIR:-/tmp}/agent-harnesses-$(date +%Y%m%d-%H%M%S)"
+
+# Reversibility bookkeeping: every edit is copied here first.
+RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/agent-harnesses"
+BACKUP_DIR="$STATE_DIR/backups/$RUN_ID"
+MANIFEST="$STATE_DIR/manifest.tsv"
 
 # ---------------------------------------------------------------------------
 # Output helpers
@@ -140,7 +161,11 @@ skipmsg() { printf '    %s[skip]%s %s\n' "$C_DIM" "$C_RESET" "$*"; }
 warn()    { printf '    %s[warn]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 failmsg() { printf '    %s[fail]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
 
-usage() { sed -n '28,38p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() {
+    # Print the "# Usage:" comment block itself, so the text cannot drift.
+    awk '/^# Usage:/{f=1; next} f && /^#$/{exit} f{sub(/^# ?/, ""); print}' "$0"
+}
+
 
 # ---------------------------------------------------------------------------
 # Small utilities
@@ -148,12 +173,132 @@ usage() { sed -n '28,38p' "$0" | sed 's/^# \{0,1\}//'; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# ---------------------------------------------------------------------------
+# Reversibility: backups + manifest (--restore)
+# ---------------------------------------------------------------------------
+# Files this script edits are copied before the edit and recorded in
+# manifest.tsv. A restore is a change too, so it snapshots the current file
+# first — an undone restore is itself undoable.
+
+manifest_add() {  # KIND ORIGINAL BACKUP
+    mkdir -p "$STATE_DIR" || return 1
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$(date -Is)" "$RUN_ID" "$1" "$2" "$3" >>"$MANIFEST"
+}
+
+backup_file() {
+    local f=$1 rel b
+    # One backup per file per run: a second copy would capture the already
+    # patched content and restore nothing useful.
+    if [ -n "${BACKED_UP[$f]:-}" ]; then
+        return 0
+    fi
+    # A file that does not exist yet is a change too: restore has to remove it.
+    if [ ! -e "$f" ]; then
+        manifest_add absent "$f" "" || return 1
+        BACKED_UP[$f]=1
+        info "noted: $f does not exist (restore will remove it)"
+        return 0
+    fi
+    rel=${f#"$HOME"/}
+    b="$BACKUP_DIR/$rel"
+    if ! mkdir -p "$(dirname "$b")" || ! cp -p "$f" "$b"; then
+        warn "could not back up $f — leaving it untouched"
+        return 1
+    fi
+    manifest_add file "$f" "$b" || return 1
+    BACKED_UP[$f]=1
+    info "backup: $f -> $b"
+}
+
+# Record a symlink target before removing it, so --restore can recreate it.
+backup_symlink() {
+    local l=$1 t
+    [ -L "$l" ] || return 0
+    t=$(readlink "$l") || return 0
+    manifest_add symlink "$l" "$t" || return 0
+}
+
+restore_list() {
+    local run
+    section "Restore points"
+    if [ ! -s "$MANIFEST" ]; then
+        info "nothing recorded yet (manifest: $MANIFEST)"
+        return 0
+    fi
+    for run in $(awk -F'\t' '{print $2}' "$MANIFEST" | sort -ru | head -n 10); do
+        printf '    %s\n' "$run"
+        awk -F'\t' -v r="$run" '$2==r {printf "      %-8s %s\n", $3, $4}' "$MANIFEST"
+    done
+    info "newest: --restore      specific run: --restore=<run>"
+}
+
+restore_run() {  # restore_run [RUN_ID] — default: newest run in the manifest
+    local wanted=${1:-} run kind orig bak n=0 snapshot
+    if [ ! -s "$MANIFEST" ]; then
+        failmsg "nothing to restore (no $MANIFEST)"
+        return 1
+    fi
+    run=$wanted
+    if [ -z "$run" ]; then
+        run=$(awk -F'\t' 'END{print $2}' "$MANIFEST")
+    fi
+    section "Restore $run"
+
+    # 1) snapshot what is on disk now, so this restore can be undone too
+    while IFS=$'\t' read -r _ r kind orig bak; do
+        [ "$r" = "$run" ] || continue
+        [ "$kind" = "file" ] || continue
+        [ -f "$orig" ] || continue
+        snapshot="$BACKUP_DIR/${orig#"$HOME"/}"
+        mkdir -p "$(dirname "$snapshot")" && cp -p "$orig" "$snapshot" &&
+            manifest_add file "$orig" "$snapshot"
+    done < <(awk -F'\t' -v r="$run" '$2==r' "$MANIFEST")
+
+    # 2) put the recorded content back
+    while IFS=$'\t' read -r _ r kind orig bak; do
+        [ "$r" = "$run" ] || continue
+        case $kind in
+            file)
+                if mkdir -p "$(dirname "$orig")" && cp -p "$bak" "$orig" 2>/dev/null; then
+                    ok "restored $orig"
+                    n=$((n + 1))
+                else
+                    warn "could not restore $orig from $bak"
+                fi
+                ;;
+            symlink)
+                if ln -sfn "$bak" "$orig" 2>/dev/null; then
+                    ok "recreated symlink $orig -> $bak"
+                    n=$((n + 1))
+                fi
+                ;;
+            absent)
+                if rm -f "$orig" 2>/dev/null; then
+                    ok "removed $orig (it did not exist before this run)"
+                    n=$((n + 1))
+                fi
+                ;;
+        esac
+    done < <(awk -F'\t' -v r="$run" '$2==r' "$MANIFEST")
+
+    if [ "$n" -eq 0 ]; then
+        warn "run $run had nothing restorable (see --restore-list)"
+        return 1
+    fi
+    ok "$n item(s) restored — back to the pre-run state"
+    info "installed binaries are additive and stay in place; to remove them too:"
+    info "  rm -rf ~/.local/bin/<tool> ~/.local/share/claude ~/.opencode/bin ..."
+    info "  mise uninstall <tool>            (if mise owned the version)"
+}
+
 # Prune a stale symlink left behind by an older npm/git install. Left in place,
 # these break `command -v` lookups and make installers pick a different bin dir.
 prune_dangling() {
     local p=$1
     if [ -L "$p" ] && [ ! -e "$p" ]; then
-        rm -f "$p" && info "removed stale symlink $p"
+        backup_symlink "$p"
+        rm -f "$p" && info "removed stale symlink $p (undo: --restore)"
     fi
 }
 
@@ -181,6 +326,22 @@ version_ge() {
 node_version() {
     have node || return 0
     node -v 2>/dev/null | sed 's/^v//'
+}
+
+# Display helpers: an empty string reads as a bug in the transcript, so say
+# "missing" instead of printing nothing.
+node_or_missing() {
+    local v
+    v=$(node_version)
+    printf '%s' "${v:-missing}"
+}
+
+mise_or_missing() {
+    local v=""
+    if have mise; then
+        v=$(mise --version 2>/dev/null | awk 'NR==1{print $1}')
+    fi
+    printf '%s' "${v:-missing}"
 }
 
 # download URL DEST — curl first, wget fallback, retries included.
@@ -426,6 +587,11 @@ install_via_mise() {
 
     # Idempotent: re-running with @latest upgrades, and pins stay editable in
     # config.toml afterwards (mise use -g codex@0.160.0 to roll back).
+    # mise rewrites that config file, so snapshot it before handing over.
+    if ! backup_file "${XDG_CONFIG_HOME:-$HOME/.config}/mise/config.toml"; then
+        failmsg "refusing to let mise edit its config without a backup"
+        return 1
+    fi
     info "mise use -g $spec@latest"
     run_detached "$log" mise use -g "$spec@latest"
     rc=$?
@@ -550,6 +716,7 @@ persist_path() {
         if [ -f "$t" ] && grep -qF '# >>> agent-harnesses PATH >>>' "$t"; then
             info "$t already has the PATH block"
         else
+            backup_file "$t" || continue
             cat >>"$t" <<'EOF'
 
 # >>> agent-harnesses PATH >>>
@@ -570,6 +737,7 @@ EOF
         # mise installs outside those dirs, so shell activation is what makes
         # its bin dirs reachable in future shells.
         if [ "$BACKEND" = "mise" ] && ! grep -qF '# >>> agent-harnesses mise >>>' "$t" 2>/dev/null; then
+            backup_file "$t" || continue
             shellname=bash
             case "$t" in *.zprofile) shellname=zsh ;; esac
             cat >>"$t" <<EOF
@@ -583,6 +751,238 @@ EOF
         fi
     done
     info "open shells still need: export PATH=\"\$HOME/.local/bin:\$PATH\""
+}
+
+# ---------------------------------------------------------------------------
+# Interactive picker (default on a TTY, or --interactive)
+# ---------------------------------------------------------------------------
+# Text only on purpose: readable over SSH, in a serial console, in CI logs, and
+# in `printf '2\n' | ./install-agent-harnesses.sh --interactive` style tests.
+# No emoji, no curses, no arrow keys — plain read -r on stdin.
+
+INTERACTIVE_INSTALLED=0   # selected harnesses that were already runnable
+
+is_tty() { [ -t 0 ] && [ -t 1 ]; }
+
+os_pretty() {
+    if [ -r /etc/os-release ]; then
+        ( . /etc/os-release; printf '%s' "${PRETTY_NAME:-${ID:-linux}}" )
+    else
+        uname -s
+    fi
+}
+
+# ask VAR "question" default — reads stdin, so piped answers behave like a human.
+# The read goes into `_v`, never into a variable named like the caller's, or
+# printf -v would write to this function's own local instead of the target.
+ask() {
+    local __var=$1 q=$2 def=${3:-} _v=""
+    printf '    %s' "$q"
+    [ -n "$def" ] && printf ' [%s]' "$def"
+    printf ' '
+    IFS= read -r _v || { printf '\n'; _v=""; }
+    # Piped answers are not echoed by the shell; show what was chosen so the
+    # transcript (and the gate log) stays readable.
+    if ! [ -t 0 ]; then
+        printf '%s\n' "${_v:-$def}"
+    fi
+    [ -n "$_v" ] || _v=$def
+    printf -v "$__var" '%s' "$_v"
+}
+
+ask_yes_no() {  # ask_yes_no "question" [y|n]
+    local ans
+    while :; do
+        ask ans "$1" "${2:-n}"
+        case ${ans,,} in
+            y|yes) return 0 ;;
+            n|no)  return 1 ;;
+            *) printf '    please answer y or n\n' ;;
+        esac
+    done
+}
+
+# Absolute path of a harness binary, empty when it is not resolvable.
+tool_path() {
+    local bin=${TOOL_BIN[$1]} p=""
+    p=$(command -v "$bin" 2>/dev/null) || p=""
+    if [ -z "$p" ] && have mise; then
+        p=$(mise_which "$bin") || p=""
+    fi
+    printf '%s' "$p"
+}
+
+explain_methods() {
+    cat <<'EOF'
+    [1] Regular install  (default)
+        Runs each harness's own installer once. Everything stays in $HOME:
+        ~/.local/bin (claude, codex, amp, pi), ~/.opencode/bin, npm's user
+        prefix. Upgrade later:  ./install-agent-harnesses.sh --upgrade
+        Vendor-supported and simple; each tool moves at its own pace and
+        pinning an older version means reinstalling by hand.
+
+    [2] mise
+        mise owns the versions in ~/.config/mise/config.toml and downloads
+        verified artifacts (aqua = signed GitHub releases; npm for gemini/amp).
+        Upgrade everything later with one command:  mise upgrade
+        Pin or roll back one tool:                   mise use -g claude@2.1.305
+        Needs mise installed (offer below); gemini and amp also need Node.
+        Do not drive the same tool through [1] and [2] — two owners, two paths.
+EOF
+}
+
+detect_installed() {
+    section "What is already installed"
+    local tool path ver
+    INTERACTIVE_INSTALLED=0
+    for tool in "${TOOL_ORDER[@]}"; do
+        if ! is_selected "$tool"; then
+            printf '    %-9s %s\n' "$tool" "(deselected)"
+            continue
+        fi
+        if installed_ok "$tool"; then
+            path=$(tool_path "$tool")
+            ver=$(verify_bin "${path:-${TOOL_BIN[$tool]}}" 2>/dev/null | cut -c1-28)
+            [ -n "$ver" ] || ver="installed"
+            printf '    %-9s %-29s %s\n' "$tool" "$ver" "${path:-path unknown}"
+            INTERACTIVE_INSTALLED=$((INTERACTIVE_INSTALLED + 1))
+        else
+            printf '    %-9s %s\n' "$tool" "not installed"
+        fi
+    done
+    if [ "$INTERACTIVE_INSTALLED" -eq 0 ]; then
+        info "nothing selected is installed yet"
+    fi
+    return 0
+}
+
+# Install mise itself from https://mise.run — user-space, no sudo; the only
+# file it adds is ~/.local/bin/mise.
+bootstrap_mise() {
+    local log="$LOG_DIR/mise-bootstrap.log" rc
+    if ! have curl; then
+        failmsg "curl is required to install mise"
+        return 1
+    fi
+    mkdir -p "$LOG_DIR"
+    info "download https://mise.run"
+    run_detached "$log" sh -c 'curl -fsSL https://mise.run | sh'
+    rc=$?
+    hash -r 2>/dev/null || true
+    refresh_path
+    if [ "$rc" -eq 0 ] && have mise; then
+        ok "mise $(mise_or_missing) installed"
+        METHOD[mise]="https://mise.run"
+        return 0
+    fi
+    failmsg "mise bootstrap failed (log: $log)"
+    show_log_tail "$log"
+    return 1
+}
+
+# choose_backend — OS + installed state, method choice, upgrade question.
+choose_backend() {
+    section "Environment"
+    info "os:      $(os_pretty)"
+    info "arch:    $(uname -m), kernel $(uname -r)"
+    info "shell:   ${SHELL:-unknown}"
+    info "node:    $(node_or_missing)"
+    info "npm:     $(npm -v 2>/dev/null || printf 'missing')"
+    info "mise:    $(mise_or_missing)"
+
+    detect_installed
+
+    section "Which install method?"
+    explain_methods
+    local choice
+    while :; do
+        ask choice "Choose 1 (regular), 2 (mise) or q to quit:" "1"
+        case $choice in
+            1) BACKEND=vendor; break ;;
+            2) BACKEND=mise;   break ;;
+            q|Q) ok "nothing was changed"; exit 0 ;;
+            *) printf '    please type 1, 2 or q\n' ;;
+        esac
+    done
+    ok "method: $BACKEND"
+
+    if [ "$BACKEND" = "mise" ] && ! have mise; then
+        warn "mise is not on PATH"
+        if ask_yes_no "Install mise now (curl https://mise.run | sh, user-space)?" y; then
+            if ! bootstrap_mise; then
+                BACKEND=vendor
+                warn "falling back to the regular installers"
+            fi
+        else
+            BACKEND=vendor
+            warn "falling back to the regular installers"
+        fi
+    fi
+
+    if [ "$INTERACTIVE_INSTALLED" -gt 0 ] && [ "$UPGRADE" -eq 0 ]; then
+        if ask_yes_no "Upgrade the $INTERACTIVE_INSTALLED installed harness(es) as well?" n; then
+            UPGRADE=1
+        fi
+    fi
+}
+
+print_upgrade_hint() {
+    section "Upgrading later"
+    if [ "$BACKEND" = "mise" ]; then
+        info "mise upgrade                    all selected tools to newest"
+        info "mise use -g claude@latest       just claude"
+        info "mise use -g claude@2.1.305      pin or roll back"
+        info "mise ls                         what resolves right now"
+        info "config: ~/.config/mise/config.toml (backed up before every edit)"
+    else
+        info "./install-agent-harnesses.sh --upgrade"
+        info "  re-runs each upstream installer; whatever upstream ships wins"
+    fi
+}
+
+# Where the binaries actually live after this run (claude called out by name).
+print_locations() {
+    local tool path real printed=0 real_claude="" base
+    section "Executable locations"
+    for tool in "${TOOL_ORDER[@]}"; do
+        case "${STATUS[$tool]:-}" in
+            ok|planned) ;;
+            *) continue ;;
+        esac
+        path=$(tool_path "$tool")
+        if [ -z "$path" ]; then
+            if [ "${STATUS[$tool]:-}" = "planned" ]; then
+                # Best guess at the install target when nothing is on disk yet.
+                if [ "$BACKEND" = "mise" ]; then
+                    printf '    %-9s %s\n' "$tool" "mise: ${MISE_SPEC[$tool]}  (after install)"
+                    printed=1
+                    continue
+                fi
+                case ${TOOL_BIN[$tool]} in
+                    opencode) base="$HOME/.opencode/bin" ;;
+                    gemini)   base="$(npm prefix -g 2>/dev/null || printf '%s' "$HOME/.local")/bin" ;;
+                    *)        base="$HOME/.local/bin" ;;
+                esac
+                printf '    %-9s %s\n' "$tool" "$base/${TOOL_BIN[$tool]}  (after install)"
+                printed=1
+            fi
+            continue
+        fi
+        real=$path
+        case $path in /*) real=$(readlink -f "$path" 2>/dev/null) || real=$path ;; esac
+        [ "$tool" = "claude" ] && real_claude=$real
+        printf '    %-9s %s\n' "$tool" "$real"
+        printed=1
+    done
+    if [ "$printed" -eq 0 ]; then
+        info "no harness binary resolved yet"
+    fi
+    if [ -n "$real_claude" ]; then
+        info "claude runs from: $real_claude"
+        info "smoke test:       $real_claude --version"
+    else
+        info "claude not resolvable yet — install it, then: command -v claude"
+    fi
 }
 
 # ---------------------------------------------------------------------------
@@ -714,13 +1114,18 @@ main() {
             --check)      CHECK_ONLY=1 ;;
             --dry-run)    DRY_RUN=1 ;;
             --fix-path)   FIX_PATH=1 ;;
+            --interactive|-i) INTERACTIVE=1 ;;
+            --no-input|--yes|-y) NO_INPUT=1 ;;
+            --restore)    RESTORE=1 ;;
+            --restore=*)  RESTORE=1; RESTORE_RUN="${1#*=}" ;;
+            --restore-list) RESTORE_LIST=1 ;;
             --verbose|-v) VERBOSE=1 ;;
             --only)       ONLY="${2:-}"; shift ;;
             --only=*)     ONLY="${1#*=}" ;;
             --skip)       SKIP="${2:-}"; shift ;;
             --skip=*)     SKIP="${1#*=}" ;;
-            --backend)    BACKEND="${2:-}"; shift ;;
-            --backend=*)  BACKEND="${1#*=}" ;;
+            --backend)    BACKEND="${2:-}"; BACKEND_SET=1; shift ;;
+            --backend=*)  BACKEND="${1#*=}"; BACKEND_SET=1 ;;
             -h|--help)    usage; exit 0 ;;
             *)            failmsg "unknown option: $1 (try --help)"; exit 2 ;;
         esac
@@ -747,18 +1152,30 @@ main() {
         fi
     fi
 
-    printf '%s\n' "${C_BOLD}agent harness installer${C_RESET} — headless, user-space, no sudo"
-    info "host:    $(uname -s) $(uname -m) — $( (. /etc/os-release 2>/dev/null && printf '%s' "${PRETTY_NAME:-linux}") )"
-    info "user:    $(id -un) (uid $(id -u), shell ${SHELL:-unknown})"
-    info "node:    $(node_version || true)"
-    info "npm:     $(npm -v 2>/dev/null || echo missing)"
-    info "backend: $BACKEND"
-    info "log dir: $LOG_DIR"
-
     if [ "$(id -u)" -eq 0 ]; then
         failmsg "do not run this as root — every harness installs into \$HOME"
         exit 2
     fi
+
+    # Reversibility has to work offline and without curl, so it is handled
+    # before any network/tooling preconditions (and before the banner, which is
+    # about installing).
+    if [ "$RESTORE_LIST" -eq 1 ]; then
+        restore_list
+        exit 0
+    fi
+    if [ "$RESTORE" -eq 1 ]; then
+        restore_run "$RESTORE_RUN"
+        exit $?
+    fi
+
+    printf '%s\n' "${C_BOLD}agent harness installer${C_RESET} — headless, user-space, no sudo"
+    info "host:    $(uname -s) $(uname -m) — $(os_pretty)"
+    info "user:    $(id -un) (uid $(id -u), shell ${SHELL:-unknown})"
+    info "node:    $(node_or_missing)"
+    info "npm:     $(npm -v 2>/dev/null || echo missing)"
+    info "log dir: $LOG_DIR"
+
     if [ "$CHECK_ONLY" -eq 0 ] && ! have curl && ! have wget; then
         failmsg "need curl or wget"
         exit 2
@@ -775,6 +1192,26 @@ main() {
     ensure_bin_dir
     mkdir -p "$LOG_DIR"
     refresh_path
+
+    # Interactive by default when a human is at the keyboard, unless the method
+    # was chosen with --backend, input was disabled, or this is --check.
+    if [ "$INTERACTIVE" -eq 0 ] && [ "$NO_INPUT" -eq 0 ] && [ "$BACKEND_SET" -eq 0 ] &&
+       [ "$CHECK_ONLY" -eq 0 ] && is_tty; then
+        INTERACTIVE=1
+    fi
+    if [ "$NO_INPUT" -eq 1 ]; then
+        INTERACTIVE=0
+    fi
+
+    if [ "$INTERACTIVE" -eq 1 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+        choose_backend
+        # The picker can change BACKEND (mise unavailable) and UPGRADE.
+        refresh_path
+    fi
+    info "backend: $BACKEND"
+    if [ "$UPGRADE" -eq 1 ]; then
+        info "upgrade: re-run installers / re-resolve @latest"
+    fi
 
     local tool bin rc failures=0
     for tool in "${TOOL_ORDER[@]}"; do
@@ -850,14 +1287,37 @@ main() {
     hash -r 2>/dev/null || true
 
     print_summary
+    print_locations
 
     if [ "$CHECK_ONLY" -eq 0 ] && [ "$DRY_RUN" -eq 0 ]; then
         print_auth_guide
     fi
 
+    # Ask before touching a profile, and say exactly what will be backed up.
+    if [ "$INTERACTIVE" -eq 1 ] && [ "$FIX_PATH" -eq 0 ] && [ "$DRY_RUN" -eq 0 ] &&
+       [ "$CHECK_ONLY" -eq 0 ]; then
+        if ask_yes_no "Add the install dirs to ~/.profile (backed up first, undo with --restore)?" y; then
+            FIX_PATH=1
+        else
+            info "skipped; PATH additions are not applied"
+        fi
+    fi
+
     if [ "$FIX_PATH" -eq 1 ] && [ "$DRY_RUN" -eq 0 ]; then
         section "Persisting PATH"
         persist_path
+    fi
+
+    if [ "$CHECK_ONLY" -eq 0 ]; then
+        print_upgrade_hint
+    fi
+
+    if [ "$DRY_RUN" -eq 0 ] && [ "$CHECK_ONLY" -eq 0 ]; then
+        section "Reversibility"
+        info "backups:   $BACKUP_DIR"
+        info "manifest:  $MANIFEST"
+        info "undo last: ./install-agent-harnesses.sh --restore"
+        info "see all:   ./install-agent-harnesses.sh --restore-list"
     fi
 
     section "Result"

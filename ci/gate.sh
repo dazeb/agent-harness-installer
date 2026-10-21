@@ -98,6 +98,102 @@ else
     pass "planned 6 mise specs (amp via npm), nothing installed"
 fi
 
+# --- interactive picker -----------------------------------------------------
+# The picker reads answers from stdin, so a pipe drives it exactly like a human.
+# The point of these checks: the prompt must explain both methods, detect what
+# is already installed, honour the choice, and never install during a dry run.
+
+begin "--interactive: quit leaves everything alone"
+if ! printf 'q\n' | "${CLEAN[@]}" ./"$SCRIPT" --interactive --dry-run >"$WORK/pick-quit.log" 2>&1; then
+    bad "quit path exited non-zero" "$WORK/pick-quit.log"
+elif ! grep -q 'nothing was changed' "$WORK/pick-quit.log"; then
+    bad "no 'nothing was changed' marker" "$WORK/pick-quit.log"
+elif grep -q 'would run' "$WORK/pick-quit.log"; then
+    bad "quit path still planned work" "$WORK/pick-quit.log"
+elif ! grep -q 'Regular install' "$WORK/pick-quit.log" ||
+     ! grep -q 'mise upgrade' "$WORK/pick-quit.log"; then
+    bad "picker does not explain both methods" "$WORK/pick-quit.log"
+else
+    pass "explained both methods, exited without a plan"
+fi
+
+begin "--interactive: choice 1 = vendor plan"
+if ! printf '1\n' | "${CLEAN[@]}" ./"$SCRIPT" --interactive --dry-run >"$WORK/pick-vendor.log" 2>&1; then
+    bad "vendor choice exited non-zero" "$WORK/pick-vendor.log"
+elif [ "$(grep -c 'would run install_' "$WORK/pick-vendor.log")" -ne 6 ]; then
+    bad "expected 6 vendor plans" "$WORK/pick-vendor.log"
+elif grep -q 'would run: mise use -g' "$WORK/pick-vendor.log"; then
+    bad "vendor choice planned a mise call" "$WORK/pick-vendor.log"
+elif ! grep -q 'claude .*\.local/bin/claude' "$WORK/pick-vendor.log"; then
+    bad "claude executable location is not shown" "$WORK/pick-vendor.log"
+else
+    pass "6 vendor plans + claude location"
+fi
+
+# A stub mise on PATH: the picker must not try to bootstrap it, and the plan
+# must be mise's, including the one-command upgrade hint.
+STUB="$WORK/stub"
+mkdir -p "$STUB"
+cat >"$STUB/mise" <<'STUBEOF'
+#!/bin/sh
+case "$1" in
+    --version) printf '2026.10.0 linux-x64\n' ;;
+    which)     exit 1 ;;
+    *)         exit 0 ;;
+esac
+STUBEOF
+chmod +x "$STUB/mise"
+
+begin "--interactive: choice 2 = mise plan"
+if ! printf '2\n' | env -i "HOME=$WORK/home" "PATH=$STUB:/usr/bin:/bin" \
+        "SHELL=/bin/bash" "TERM=dumb" ./"$SCRIPT" --interactive --dry-run \
+        >"$WORK/pick-mise.log" 2>&1; then
+    bad "mise choice exited non-zero" "$WORK/pick-mise.log"
+elif ! grep -q 'method: mise' "$WORK/pick-mise.log"; then
+    bad "picker did not switch to mise" "$WORK/pick-mise.log"
+elif [ "$(grep -c 'would run: mise use -g' "$WORK/pick-mise.log")" -ne 6 ]; then
+    bad "expected 6 mise plans" "$WORK/pick-mise.log"
+elif ! grep -q 'mise upgrade' "$WORK/pick-mise.log"; then
+    bad "mise upgrade command is not shown" "$WORK/pick-mise.log"
+else
+    pass "6 mise plans + upgrade command"
+fi
+
+begin "--no-input never prompts"
+if ! printf '1\n' | "${CLEAN[@]}" ./"$SCRIPT" --no-input --dry-run >"$WORK/noinput.log" 2>&1; then
+    bad "--no-input exited non-zero" "$WORK/noinput.log"
+elif grep -q 'Choose 1' "$WORK/noinput.log"; then
+    bad "--no-input still prompted" "$WORK/noinput.log"
+elif ! grep -q 'backend: vendor' "$WORK/noinput.log"; then
+    bad "--no-input did not keep the vendor default" "$WORK/noinput.log"
+else
+    pass "no prompt, vendor default kept"
+fi
+
+# --- reversibility ----------------------------------------------------------
+# --fix-path edits ~/.profile, so it must copy it first and --restore must put
+# the original bytes back.
+begin "--fix-path backs up, --restore reverts"
+RH="$WORK/rhome"
+mkdir -p "$RH/bin"
+printf '#!/bin/sh\nprintf "1.2.3 (Claude Code)\\n"\n' >"$RH/bin/claude"
+chmod +x "$RH/bin/claude"
+printf 'ORIGINAL\n' >"$RH/.profile"
+if ! env -i "HOME=$RH" "PATH=$RH/bin:/usr/bin:/bin" "SHELL=/bin/bash" \
+        ./"$SCRIPT" --check --fix-path --only claude --no-input >"$WORK/fixpath.log" 2>&1; then
+    bad "--fix-path run failed" "$WORK/fixpath.log"
+elif ! grep -q 'agent-harnesses PATH' "$RH/.profile"; then
+    bad "PATH block was not added" "$WORK/fixpath.log"
+elif ! grep -rqs '^ORIGINAL$' "$RH/.local/state/agent-harnesses/backups"; then
+    bad "no backup of the original profile" "$WORK/fixpath.log"
+elif ! env -i "HOME=$RH" "PATH=/usr/bin:/bin" ./"$SCRIPT" --restore >"$WORK/restore.log" 2>&1; then
+    bad "--restore failed" "$WORK/restore.log"
+elif [ "$(cat "$RH/.profile")" != "ORIGINAL" ]; then
+    bad "--restore did not bring back the original profile" "$WORK/restore.log"
+else
+    pass "backed up, patched, restored byte-for-byte"
+fi
+
 # Rejections: usage errors must exit 2, not install anything.
 begin "unknown backend is rejected"
 ./"$SCRIPT" --backend not-a-backend >"$WORK/backend.log" 2>&1

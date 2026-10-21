@@ -4,8 +4,9 @@
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 One self-contained Bash script that installs the six mainstream **terminal coding agents** on a
-**headless machine** — no browser, no desktop session, no interactive prompts, no `sudo`, nothing
-outside `$HOME`.
+**headless machine** — no browser, no desktop session, no `sudo`, nothing outside `$HOME`. On a
+terminal it asks one question (regular install or mise); everywhere else it runs unattended with
+sane defaults.
 
 ```console
 $ ./install-agent-harnesses.sh --check
@@ -92,8 +93,65 @@ git clone git@github.com:dazeb/agent-harness-installer.git
 cd agent-harness-installer
 ./install-agent-harnesses.sh --check        # what is present / missing, nothing changes
 ./install-agent-harnesses.sh --dry-run      # show the plan, install nothing
-./install-agent-harnesses.sh                # install everything missing
+./install-agent-harnesses.sh                # pick a method, then install what is missing
 ```
+
+On a terminal (stdin **and** stdout are a TTY) the last command opens a text-only picker: it reports
+the OS, lists what is already installed with version and path, explains both methods, and asks which
+one to use. Piped, in cron, in CI, or with `--backend`/`--no-input` given, no question is asked and
+the vendor installers stay the default — so old invocations behave exactly as before.
+
+## Interactive walkthrough
+
+```console
+$ ./install-agent-harnesses.sh
+agent harness installer — headless, user-space, no sudo
+    host:    Linux x86_64 — Ubuntu 26.04.1 LTS
+    user:    dazeb (uid 1000, shell /usr/bin/zsh)
+    node:    22.20.0
+    npm:     10.9.4
+    log dir: /tmp/agent-harnesses-20261021-031500
+
+==> Environment
+    os:      Ubuntu 26.04.1 LTS
+    arch:    x86_64, kernel 7.0.0-38-generic
+    shell:   /usr/bin/zsh
+    node:    22.20.0
+    npm:     10.9.4
+    mise:    2026.10.0
+
+==> What is already installed
+    claude    2.1.305 (Claude Code)           /home/dazeb/.local/bin/claude
+    codex     codex-cli 0.163.0               /home/dazeb/.local/bin/codex
+    opencode  not installed
+    gemini    not installed
+    amp       not installed
+    pi        not installed
+
+==> Which install method?
+    [1] Regular install  (default)
+        ...explanation...
+    [2] mise
+        ...explanation...
+    Choose 1 (regular), 2 (mise) or q to quit: [1] 2
+    [ok]   method: mise
+    Upgrade the 2 installed harness(es) as well? [n] n
+    backend: mise
+```
+
+Notes on the flow:
+
+- Answers are plain text: `1`, `2`, `q`, `y`, `n`. Enter accepts the `[bracketed]` default, and `q`
+  exits without writing anything. `Ctrl-D` behaves like the default.
+- Choosing `2` when `mise` is missing offers to install it (`curl https://mise.run | sh`, user-space,
+  one file: `~/.local/bin/mise`); declining falls back to `[1]` rather than failing later.
+- If anything is already installed, one extra question asks whether to upgrade it — otherwise the
+  run is idempotent and only fills the gaps.
+- After the install: a summary table, the **Executable locations** section (with
+  `claude runs from: /home/dazeb/.local/share/mise/installs/claude/2.1.305/bin/claude` and the exact
+  smoke test), the headless-auth guide, and the method's upgrade command.
+- `--interactive` forces the picker even when stdin is a pipe (that is how the CI gate tests it);
+  `--no-input` never prompts.
 
 Or without cloning:
 
@@ -113,10 +171,14 @@ non-zero exit code if anything failed.
   --check          report status only; never install   (exit 1 if something is missing)
   --dry-run        print what would be installed; change nothing
   --backend NAME   vendor (default, each vendor's own installer) or mise
+  --interactive    force the method picker, even when stdin is not a TTY
+  --no-input       never prompt; keep the vendor default (alias: --yes)
   --upgrade        re-run the upstream installer even if the tool already works
   --only TOOLS     restrict to a comma/space list: claude,codex,opencode,gemini,amp,pi
   --skip TOOLS     exclude a comma/space list
   --fix-path       append a guarded PATH block to ~/.profile and ~/.zprofile
+  --restore        put back the files edited by the last run
+  --restore-list   show the recorded restore points
   --verbose        stream installer output instead of only logging it
   -h, --help       this help
 ```
@@ -128,6 +190,8 @@ Examples:
 ./install-agent-harnesses.sh --skip gemini         # everything except Gemini
 ./install-agent-harnesses.sh --only codex --upgrade
 ./install-agent-harnesses.sh --backend mise        # let mise own the versions
+./install-agent-harnesses.sh -i --dry-run          # try the picker without installing
+./install-agent-harnesses.sh --restore             # undo the last profile/mise edits
 ```
 
 Idempotent: tools that already answer `--version` are skipped (or upgraded with `--upgrade`).
@@ -200,6 +264,33 @@ is non-empty **or** the matching env var is set — `{}` counts as absent.
 | New shell doesn't see a tool | run `--fix-path` (guarded block in `~/.profile` **and** `~/.zprofile`, since zsh login shells skip `.profile`) or source the profile |
 | The brew fallback fires in a container | it is the last resort for Gemini only; if Homebrew exists but its registry is unreachable, `--skip gemini` and install via npm |
 
+## Reversibility
+
+Nothing is edited in place. Before the script appends a PATH block to `~/.profile` / `~/.zprofile`,
+lets `mise use -g` rewrite `~/.config/mise/config.toml`, or deletes a dangling symlink, it records
+what was there:
+
+```console
+==> Reversibility
+    backups:   /home/dazeb/.local/state/agent-harnesses/backups/20261021-031500-412927
+    manifest:  /home/dazeb/.local/state/agent-harnesses/manifest.tsv
+    undo last: ./install-agent-harnesses.sh --restore
+    see all:   ./install-agent-harnesses.sh --restore-list
+```
+
+- `~/.local/state/agent-harnesses/backups/<run>/…` holds a byte copy of every edited file, mirroring
+  its `$HOME` path; `manifest.tsv` is the append-only ledger (`timestamp`, `run`, `file|symlink`,
+  original, backup or link target).
+- `--restore-list` prints the ten most recent runs and what each one touched.
+- `--restore` restores the newest run; `--restore=<run>` a specific one. A restore snapshots the
+  current file first, so **undoing a restore is itself undoable**. A file the run *created* (e.g. a
+  `~/.profile` that was absent, or a fresh `~/.config/mise/config.toml`) is removed again, and a
+  pruned dangling symlink is recreated.
+- Only files are reverted. Installed binaries are additive and left alone — see
+  [Uninstall](#uninstall) for those, or `mise uninstall <tool>` when mise owned the version.
+- If a file cannot be copied (read-only `$HOME`, full disk), the script skips the edit instead of
+  proceeding unbacked.
+
 ## Uninstall
 
 Everything is user-space, so removal is a `rm` (or the package manager that installed it):
@@ -214,7 +305,7 @@ rm -rf ~/.pi/agent ~/bin/pi                          # Pi
 ```
 
 Remove the `# >>> agent-harnesses PATH >>>` block from `~/.profile` / `~/.zprofile` to undo
-`--fix-path`.
+`--fix-path` by hand — or let `--restore` do it from the backup.
 
 ## Development
 
@@ -227,9 +318,11 @@ make gate      # = ./ci/gate.sh — the canonical gate, used by CI and by ci/run
 `ci/gate.sh` is the single source of truth: `.github/workflows/ci.yml` is a thin job that runs it, and
 `ci/run-gate.sh` runs the same file on a VM when GitHub cannot schedule jobs. It also works on a box
 where nothing is installed — the dry runs execute with a scrubbed `HOME`/`PATH`, so the plan is the
-same there as on a fully provisioned laptop. There is no build step and no runtime dependency beyond
-`bash` and `curl`/`wget` (mise is only touched by `--backend mise`, and the gate proves the
-`--backend mise` plan works with no mise on the box at all).
+same there as on a fully provisioned laptop. It covers the picker too: piped `q` / `1` / `2` answers
+must not install anything, `--no-input` must not prompt, and `--fix-path` → `--restore` must return
+the original `~/.profile` byte-for-byte. There is no build step and no runtime dependency beyond
+`bash` and `curl`/`wget` (mise is only touched by `--backend mise`, and a stub `mise` on `PATH` lets
+the gate prove the mise plan without downloading it).
 
 Adding a harness means five things: an entry in `TOOL_ORDER` / `TOOL_LABEL` / `TOOL_BIN`, its
 credential path in `TOOL_CREDS` (or env var in `TOOL_ENV`), its `MISE_SPEC` (registry short name,
@@ -252,8 +345,10 @@ What is *not* part of Actions is the commit status API, and that is enough to ke
 ```
 
 `ci/gate.sh` is the shared payload: `bash -n`, `shellcheck --severity=warning`, `--help`, both
-`--dry-run --backend {vendor,mise}` plans, and the two usage-error rejections. `.github/workflows/ci.yml`
-and `ci/run-gate.sh` both end up running it, so the verdict is identical either way.
+`--dry-run --backend {vendor,mise}` plans, the interactive picker (piped `q`/`1`/`2`, plus
+`--no-input`), a `--fix-path` → `--restore` round-trip, and the two usage-error rejections.
+`.github/workflows/ci.yml` and `ci/run-gate.sh` both end up running it, so the verdict is identical
+either way.
 
 `ci/run-gate.sh` is the runner stand-in. It keeps a mirror clone, gates `origin/main`'s SHA in the
 `ci/Dockerfile` image (so the box needs no `shellcheck` of its own), and posts `pending` → `success`

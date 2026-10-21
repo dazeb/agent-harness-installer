@@ -12,6 +12,7 @@ test: lint
 	./install-agent-harnesses.sh --dry-run --backend mise | tee /tmp/ah-dry-mise.log
 	grep -q 'backend: mise' /tmp/ah-dry-mise.log
 	grep -q 'dry run complete' /tmp/ah-dry-mise.log
+	printf 'q\n' | ./install-agent-harnesses.sh --dry-run --interactive | grep -q 'nothing was changed'
 	! ./install-agent-harnesses.sh --backend not-a-backend 2>/dev/null
 	! ./install-agent-harnesses.sh --only not-a-tool 2>/dev/null
 
