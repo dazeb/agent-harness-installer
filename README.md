@@ -257,11 +257,14 @@ and `ci/run-gate.sh` both end up running it, so the verdict is identical either 
 
 `ci/run-gate.sh` is the runner stand-in. It keeps a mirror clone, gates `origin/main`'s SHA in the
 `ci/Dockerfile` image (so the box needs no `shellcheck` of its own), and posts `pending` → `success`
-/`failure` under the context `ah-gate`. The commit page shows a check dot and the badge works:
+/`failure` under the context `ah-gate`. The commit page shows a check dot, and the badge works:
 
 ```markdown
-![gate](https://img.shields.io/github/commit-status/dazeb/agent-harness-installer/main/ah-gate)
+![gate](https://img.shields.io/github/checks-status/dazeb/agent-harness-installer/main)
 ```
+
+(the path form `github/commit-status/…/main/ah-gate` 404s — that endpoint takes no context segment;
+`checks-status` is the one that renders from the posted status.)
 
 Setup on any box with docker (Debian/Ubuntu shown; 4 cores / 2 GB is plenty — the gate is bash):
 
