@@ -92,7 +92,6 @@ Idempotent: tools that already answer `--version` are skipped (or upgraded with 
 | `1` | at least one harness failed, or `--check` found a missing harness |
 | `2` | usage error (unknown flag, unknown tool name, missing curl/wget, running as root) |
 
-
 ## Why the installers don't hang
 
 Upstream installers branch on whether stdout is a terminal. Give them a pipe or a bogus `TERM` and
@@ -165,14 +164,12 @@ Remove the `# >>> agent-harnesses PATH >>>` block from `~/.profile` / `~/.zprofi
 ## Development
 
 ```bash
-bash -n install-agent-harnesses.sh
-shellcheck --severity=warning install-agent-harnesses.sh
-./install-agent-harnesses.sh --dry-run
+make lint      # bash -n + shellcheck --severity=warning
+make test      # lint, --help, --dry-run, unknown-tool rejection
 ```
 
-CI runs those checks on every push, plus `--help`, `--dry-run` and the two rejection paths (unknown
-tool name, running as root). There is no build step and no runtime dependency beyond `bash` and
-`curl`/`wget`.
+`make test` is the same gate as `.github/workflows/ci.yml`, so it can be run locally when hosted CI
+is unavailable. There is no build step and no runtime dependency beyond `bash` and `curl`/`wget`.
 
 Adding a harness means four things: an entry in `TOOL_ORDER` / `TOOL_LABEL` / `TOOL_BIN`, its
 credential path in `TOOL_CREDS` (or env var in `TOOL_ENV`), an `install_<tool>()` function that
