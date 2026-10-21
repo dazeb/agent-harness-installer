@@ -166,9 +166,29 @@ skipmsg() { printf '    %s[skip]%s %s\n' "$C_DIM" "$C_RESET" "$*"; }
 warn()    { printf '    %s[warn]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 failmsg() { printf '    %s[fail]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; }
 
+# How this script was started: a file on disk, or `bash -c "$(curl ...)"` /
+# `curl ... | bash -s --`, where $0 is just "bash" and there is no file to re-read.
+RAW_URL="https://raw.githubusercontent.com/dazeb/agent-harness-installer/main/install-agent-harnesses.sh"
+if [ -f "$0" ]; then
+    SELF_CMD=$0
+else
+    SELF_CMD="bash -c \"\$(curl -fsSL $RAW_URL)\" bash"
+fi
+
 usage() {
     # Print the "# Usage:" comment block itself, so the text cannot drift.
-    awk '/^# Usage:/{f=1; next} f && /^#$/{exit} f{sub(/^# ?/, ""); print}' "$0"
+    local src=""
+    if [ -f "$0" ]; then
+        src=$(cat "$0")
+    elif [ -n "${BASH_EXECUTION_STRING:-}" ]; then
+        src=$BASH_EXECUTION_STRING
+    else
+        printf 'Usage: curl -fsSL %s | bash -s -- [options]\nOptions: see %s\n' \
+            "$RAW_URL" "https://github.com/dazeb/agent-harness-installer#usage"
+        return 0
+    fi
+    printf '%s\n' "$src" |
+        awk '/^# Usage:/{f=1; next} f && /^#$/{exit} f{sub(/^# ?/, ""); print}'
 }
 
 
@@ -666,7 +686,7 @@ install_via_mise() {
             # a new build every few hours, so a default mise can see none of them.
             info "mise found no version old enough to install (minimum_release_age)."
             info "  accept newer builds for this tool:  mise settings set minimum_release_age 0s"
-            info "  or install just this one natively:   $0 --backend vendor --only $tool"
+            info "  or install just this one natively:   $SELF_CMD --backend vendor --only $tool"
         fi
         return 1
     fi

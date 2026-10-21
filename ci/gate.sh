@@ -349,6 +349,21 @@ else
     bad "expected exit 2, got $rc" "$WORK/tool.log"
 fi
 
+begin "runs as a one-liner (curl | bash, bash -c \"\$(curl ...)\")"
+H=$WORK/oneliner-home; mkdir -p "$H"
+cat "$SCRIPT" | HOME=$H bash -s -- --help >"$WORK/pipe.log" 2>&1
+rc1=$?
+HOME=$H bash -c "$(cat "$SCRIPT")" bash --help >"$WORK/dashc.log" 2>&1
+rc2=$?
+cat "$SCRIPT" | HOME=$H bash -s -- --only not-a-tool >"$WORK/pipe2.log" 2>&1
+rc3=$?
+if [ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ] && grep -q -- '--no-input' "$WORK/dashc.log" &&
+   [ "$rc3" -eq 2 ]; then
+    pass "help works without a file on disk; bad flags exit 2 from a pipe"
+else
+    bad "pipe help rc=$rc1, -c help rc=$rc2, pipe bad-flag rc=$rc3 (want 0/0/2)" "$WORK/dashc.log"
+fi
+
 printf '\n'
 if [ "$FAILED" -eq 0 ]; then
     printf 'gate: PASS (%d checks)\n' "$STEP"

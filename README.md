@@ -94,6 +94,33 @@ installs, plus `mise activate bash` / `mise activate zsh` when `--backend mise` 
 
 ## Quick start
 
+### One-liner (VPS, fresh box)
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/dazeb/agent-harness-installer/main/install-agent-harnesses.sh)"
+```
+
+Run it as a normal user, not root (the script refuses root; on a fresh VPS create one with
+`adduser dev && su - dev`). In a terminal it opens the picker (regular install or mise). Add flags
+after a trailing `bash`:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/dazeb/agent-harness-installer/main/install-agent-harnesses.sh)" bash --check
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/dazeb/agent-harness-installer/main/install-agent-harnesses.sh)" bash --no-input --only claude,codex
+```
+
+Unattended (cloud-init, Ansible, cron) the pipe form works too and never prompts:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dazeb/agent-harness-installer/main/install-agent-harnesses.sh | bash -s -- --no-input
+```
+
+`bash -c "$(curl …)"` keeps your terminal on stdin, so the picker works; with `| bash` stdin is the
+script itself, so no question is ever asked. Both run the script unmodified from `main`. To read it
+first (recommended), use the clone below or `curl -fsSLO <url>` then `bash install-agent-harnesses.sh`.
+
+### From a clone
+
 ```bash
 git clone git@github.com:dazeb/agent-harness-installer.git
 cd agent-harness-installer
