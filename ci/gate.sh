@@ -309,6 +309,27 @@ else
     pass "installer stopped, temp script removed"
 fi
 
+begin "mise \"no versions found\" gets an actionable hint"
+MH="$WORK/mhome"
+MS="$WORK/mstub"
+mkdir -p "$MH" "$MS"
+cat >"$MS/mise" <<'STUBEOF'
+#!/bin/sh
+case "$1" in
+    --version) printf '2026.10.0 linux-x64\n' ;;
+    use)       printf 'mise ERROR Failed to install x: no versions found for x\n'; exit 1 ;;
+    *)         exit 0 ;;
+esac
+STUBEOF
+chmod +x "$MS/mise"
+env -i "HOME=$MH" "PATH=$MS:/usr/bin:/bin" "SHELL=/bin/bash" \
+    ./"$SCRIPT" --no-input --backend mise --only amp >"$WORK/mise-hint.log" 2>&1
+if grep -q 'minimum_release_age' "$WORK/mise-hint.log" && grep -q -- '--backend vendor --only amp' "$WORK/mise-hint.log"; then
+    pass "explains the cause and both ways out"
+else
+    bad "no hint after a 'no versions found' failure" "$WORK/mise-hint.log"
+fi
+
 # Rejections: usage errors must exit 2, not install anything.
 begin "unknown backend is rejected"
 ./"$SCRIPT" --backend not-a-backend >"$WORK/backend.log" 2>&1

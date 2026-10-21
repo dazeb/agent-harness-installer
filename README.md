@@ -78,6 +78,12 @@ What it costs:
   fails fast with that hint rather than silently falling back.
 - the npm backend shells out to Node, so Gemini needs a Node runtime in mise's resolution too.
 - the registry can lag a vendor release, and `ls-remote` is blind for npm-only names like Amp.
+- mise's `minimum_release_age` hides builds that are too new. Amp publishes every few hours, so on a
+  default mise `--backend mise` can fail for Amp with `no versions found`. The installer says so and
+  offers two ways out: `mise settings set minimum_release_age 0s` (you accept fresh builds), or
+  `--backend vendor --only amp` (native installer for that one tool).
+- OpenCode differs by backend: the vendor installer gives OpenCode 1.x, while mise's `opencode`
+  resolves to the npm `@opencode/cli` package, which is OpenCode 2.x. Pick one owner and stay on it.
 
 **Do not run both.** Two owners per command name is how a box ends up with `codex` 0.163.0 on
 `PATH` while mise still pins 0.160.0 — exactly the drift `--check` surfaces. If you switch, delete

@@ -661,6 +661,13 @@ install_via_mise() {
     if [ "$rc" -ne 0 ]; then
         failmsg "mise failed for $tool (log: $log)"
         show_log_tail "$log"
+        if grep -q 'no versions found' "$log" 2>/dev/null; then
+            # mise's minimum_release_age hides builds that are too new. Amp ships
+            # a new build every few hours, so a default mise can see none of them.
+            info "mise found no version old enough to install (minimum_release_age)."
+            info "  accept newer builds for this tool:  mise settings set minimum_release_age 0s"
+            info "  or install just this one natively:   $0 --backend vendor --only $tool"
+        fi
         return 1
     fi
     METHOD[$tool]="mise ($spec)"
