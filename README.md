@@ -1,22 +1,130 @@
-# agent-harness-installer
+<p align="center">
+  <img src="assets/logo.png" alt="Agent Harness Installer — terminal harness icon" width="112" height="112">
+</p>
 
-[![ci](https://github.com/dazeb/agent-harness-installer/actions/workflows/ci.yml/badge.svg)](https://github.com/dazeb/agent-harness-installer/actions/workflows/ci.yml)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<h1 align="center">Agent Harness Installer</h1>
 
-One self-contained Bash script that installs the six mainstream **terminal coding agents** on a
-**headless machine** — no browser, no desktop session, no `sudo`, nothing outside `$HOME`. On a
-terminal it asks one question (regular install or mise); everywhere else it runs unattended with
-sane defaults.
+<p align="center">
+  <strong>One command. Six coding agents. Ready for your VPS.</strong><br>
+  A self-contained Bash installer for headless machines, with vendor installers or mise.
+</p>
 
-```console
-$ ./install-agent-harnesses.sh --check
-    claude    2.1.305 (Claude Code)          ok      yes
-    codex     codex-cli 0.163.0              ok      yes
-    opencode  1.18.35                        ok      yes
-    gemini    0.63.0                         ok      no
-    amp       0.0.1792540877-gcc084c (relea... ok      no
-    pi        1.3.0                          ok      no
+<p align="center">
+  <a href="https://github.com/dazeb/agent-harness-installer/actions/workflows/ci.yml"><img src="https://github.com/dazeb/agent-harness-installer/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/dazeb/agent-harness-installer/commits/main"><img src="https://img.shields.io/github/checks-status/dazeb/agent-harness-installer/main" alt="Gate status"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+</p>
+
+## Install in one command
+
+Run this over SSH as a **normal user** with Bash 4+ and curl:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/dazeb/agent-harness-installer/main/install-agent-harnesses.sh)"
 ```
+
+Choose **regular install** or **mise** in the text picker. The script detects working agents,
+installs what is missing, verifies the commands, and prints authentication instructions and log paths.
+Already installed agents stay as they are unless you choose to upgrade.
+
+On a fresh VPS logged in as root, create a user first (Debian/Ubuntu example):
+
+```bash
+adduser dev
+su - dev
+```
+
+**Want just Claude and Codex?** Add options after a trailing `bash`:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/dazeb/agent-harness-installer/main/install-agent-harnesses.sh)" bash --no-input --only claude,codex --fix-path
+```
+
+The URL tracks `main`. To inspect the script before running it, use the
+[download or clone instructions](#download-or-clone). Agent authentication is a separate step;
+see [headless authentication](#authentication-headless).
+
+<p align="center">
+  <a href="#what-it-installs">Supported agents</a> ·
+  <a href="#common-workflows">Common workflows</a> ·
+  <a href="#requirements">Requirements</a> ·
+  <a href="#usage">All options</a> ·
+  <a href="#troubleshooting">Troubleshooting</a> ·
+  <a href="#development">Development</a>
+</p>
+
+## Built for SSH and fresh machines
+
+- **User-space installs.** No sudo or system package installation by this script. Agent files
+  live in user directories; temporary downloads and logs use the system temporary directory.
+- **Two install methods.** Use each vendor's installer, or let mise manage versions and upgrades.
+- **Repeatable runs.** Working commands are skipped by default. Select agents with `--only` or `--skip`.
+- **Verification after installation.** The script starts each command to check that it runs,
+  then prints its version and executable location.
+- **Recoverable configuration edits.** PATH and mise configuration changes are backed up before
+  editing, with `--restore` to recover the previous files.
+- **Headless operation.** Upstream installers get closed stdin and log output; on Linux,
+  `setsid` also removes their controlling terminal. `--no-input` disables the installer's picker.
+
+## Common workflows
+
+The examples below use a local copy of the script. The same options work with the one-liner
+by adding `bash` followed by the options, as shown above.
+
+| Goal | Command |
+|---|---|
+| See what is installed without installing anything | `./install-agent-harnesses.sh --check` |
+| Preview an unattended vendor install | `./install-agent-harnesses.sh --no-input --dry-run` |
+| Install only Claude and Codex | `./install-agent-harnesses.sh --no-input --only claude,codex` |
+| Install all except Gemini | `./install-agent-harnesses.sh --no-input --skip gemini` |
+| Upgrade one agent | `./install-agent-harnesses.sh --no-input --only codex --upgrade` |
+| Install through an existing mise setup | `./install-agent-harnesses.sh --backend mise` |
+| Persist agent directories for future login shells | `./install-agent-harnesses.sh --no-input --fix-path` |
+| Show configuration restore points | `./install-agent-harnesses.sh --restore-list` |
+| Undo the latest recorded configuration changes | `./install-agent-harnesses.sh --restore` |
+
+### Unattended installs
+
+For cloud-init, Ansible, or cron, use a normal user's account and explicitly disable prompts:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dazeb/agent-harness-installer/main/install-agent-harnesses.sh | bash -s -- --no-input --only claude,codex --fix-path
+```
+
+`bash -c "$(curl …)"` keeps terminal input available for the picker. The pipe form uses stdin to
+read the script and does not open the picker automatically. Avoid `--interactive` with the pipe
+form; use the first one-liner or a downloaded copy when you want to answer questions.
+
+For automation that must distinguish a download failure from a successful run, download first
+and execute only if curl succeeds:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/dazeb/agent-harness-installer/main/install-agent-harnesses.sh -o install-agent-harnesses.sh && bash install-agent-harnesses.sh --no-input
+```
+
+### Download or clone
+
+No GitHub account or SSH key is needed:
+
+```bash
+git clone https://github.com/dazeb/agent-harness-installer.git
+cd agent-harness-installer
+./install-agent-harnesses.sh --check
+./install-agent-harnesses.sh --no-input --dry-run
+./install-agent-harnesses.sh
+```
+
+Or download the single script, inspect it, then run:
+
+```bash
+curl -fsSLO https://raw.githubusercontent.com/dazeb/agent-harness-installer/main/install-agent-harnesses.sh
+less install-agent-harnesses.sh
+bash install-agent-harnesses.sh
+```
+
+To use a reviewed revision, replace `main` in the download URL with a full commit SHA. This pins
+**the installer script**; vendor installers still fetch their own releases. Use mise's version
+management when you need to pin the agents themselves.
 
 ## What it installs
 
@@ -29,17 +137,18 @@ $ ./install-agent-harnesses.sh --check
 | Amp | `amp` | Sourcegraph | `ampcode.com/install.sh` | `@sourcegraph/amp` (npm) | `~/.amp/bin` + symlink |
 | Pi | `pi` | Earendil Works | `pi.dev/install.sh` | `@earendil-works/pi-coding-agent` (npm) | `~/.pi/agent` + symlink |
 
-The vendor installer is always preferred; npm is the documented fallback and is only used when the
-vendor path fails. Verification is a real `--version` call under `timeout` — a zero exit code from
-an installer is not trusted on its own.
+With the vendor backend, native installers are preferred where available; their npm fallback is
+used when the installer fails. Gemini starts with npm and can fall back to Homebrew. Already-installed detection uses `--version`. Post-install verification tries `--version`,
+`-v`, then `--help`, with time limits on those probes. Installer success alone is not enough.
 
 Passing `--backend mise` swaps the whole table for [mise](https://mise.jdx.dev/) specs instead (see
 [Version management](#version-management-vendor-installers-or-mise)).
 
 ## Version management: vendor installers or mise
 
-Default (`--backend vendor`): each harness is installed by its own vendor installer with npm as
-fallback — the path each vendor supports, and the one that keeps self-updating.
+Default (`--backend vendor`): use each harness's installer with an npm fallback where provided.
+Gemini uses npm first, then Homebrew. The wrapper does not schedule updates; rerun with
+`--upgrade` to refresh working installs.
 
 If the machine already runs [mise](https://mise.jdx.dev/), you can hand version ownership to it:
 
@@ -52,24 +161,24 @@ If the machine already runs [mise](https://mise.jdx.dev/), you can hand version 
 Each tool is written to the global `~/.config/mise/config.toml` with `mise use -g <spec>@latest`,
 and the result is verified through `mise which` — so nothing depends on `mise activate` being
 loaded in the current shell, and a shim that prints warnings on stderr cannot poison the version
-string. Specs come from mise's registry: aqua (signed GitHub releases) where available, npm
-otherwise.
+string. Short specs resolve through mise's registry, so the backend and package can change as the registry
+evolves. Inspect `mise ls -g` after installation to confirm what it selected.
 
 | Harness | mise spec | Backend | Notes |
 |---|---|---|---|
-| claude | `claude` | `aqua:anthropics/claude-code` | also `http:claude` |
-| codex | `codex` | `aqua:openai/codex` | npm backend exists too |
-| opencode | `opencode` | `aqua:anomalyco/opencode` | |
+| claude | `claude` | mise registry | registry selects the download backend |
+| codex | `codex` | mise registry | registry selects the download backend |
+| opencode | `opencode` | mise registry | check the resolved package and major version |
 | gemini | `gemini` | `npm:@google/gemini-cli` | npm backend needs Node on `PATH` |
-| amp | `npm:@ampcode/cli` | npm only | the `amp` short name cannot list versions (`mise ls-remote amp` is empty); the package is byte-identical to `@sourcegraph/amp` |
-| pi | `pi` | `aqua:earendil-works/pi` | also `github:` / npm |
+| amp | `npm:@ampcode/cli` | explicit npm spec | avoids relying on the `amp` registry short name |
+| pi | `pi` | mise registry | registry selects the download backend |
 
 Why you might prefer it:
 
 - **Pin and roll back** — `mise use -g codex@0.160.0` is one line; the vendor installers only ever
   give you "latest". `mise upgrade` then updates everything together, `mise ls -g` is the inventory.
-- **Verified artifacts** — aqua downloads checksummed/signed releases instead of piping an
-  `install.sh` into a shell.
+- **Verified artifacts** — mise can use aqua release verification where supported by the selected
+  registry entry; the exact checks depend on that backend.
 - **No sudo, no npm global prefix** — the same reason this script exists.
 
 What it costs:
@@ -82,57 +191,17 @@ What it costs:
   default mise `--backend mise` can fail for Amp with `no versions found`. The installer says so and
   offers two ways out: `mise settings set minimum_release_age 0s` (you accept fresh builds), or
   `--backend vendor --only amp` (native installer for that one tool).
-- OpenCode differs by backend: the vendor installer gives OpenCode 1.x, while mise's `opencode`
-  resolves to the npm `@opencode/cli` package, which is OpenCode 2.x. Pick one owner and stay on it.
+- OpenCode can differ by backend and registry revision. Check the resolved package and major
+  version before switching an existing setup.
 
 **Do not run both.** Two owners per command name is how a box ends up with `codex` 0.163.0 on
-`PATH` while mise still pins 0.160.0 — exactly the drift `--check` surfaces. If you switch, delete
-the losing copy (`mise prune`, or the leftover `~/.local/bin` wrapper).
+`PATH` while mise still pins 0.160.0 — exactly the drift `--check` surfaces. Before switching, inspect
+`command -v <tool>` and `mise ls -g`, then remove the old installation using its owning package manager. `mise prune` alone does not switch the configured owner.
 
-`--fix-path` writes the block that matches your backend: the plain `PATH` entries for vendor
-installs, plus `mise activate bash` / `mise activate zsh` when `--backend mise` is in use.
-
-## Quick start
-
-### One-liner (VPS, fresh box)
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/dazeb/agent-harness-installer/main/install-agent-harnesses.sh)"
-```
-
-Run it as a normal user, not root (the script refuses root; on a fresh VPS create one with
-`adduser dev && su - dev`). In a terminal it opens the picker (regular install or mise). Add flags
-after a trailing `bash`:
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/dazeb/agent-harness-installer/main/install-agent-harnesses.sh)" bash --check
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/dazeb/agent-harness-installer/main/install-agent-harnesses.sh)" bash --no-input --only claude,codex
-```
-
-Unattended (cloud-init, Ansible, cron) the pipe form works too and never prompts:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/dazeb/agent-harness-installer/main/install-agent-harnesses.sh | bash -s -- --no-input
-```
-
-`bash -c "$(curl …)"` keeps your terminal on stdin, so the picker works; with `| bash` stdin is the
-script itself, so no question is ever asked. Both run the script unmodified from `main`. To read it
-first (recommended), use the clone below or `curl -fsSLO <url>` then `bash install-agent-harnesses.sh`.
-
-### From a clone
-
-```bash
-git clone git@github.com:dazeb/agent-harness-installer.git
-cd agent-harness-installer
-./install-agent-harnesses.sh --check        # what is present / missing, nothing changes
-./install-agent-harnesses.sh --dry-run      # show the plan, install nothing
-./install-agent-harnesses.sh                # pick a method, then install what is missing
-```
-
-On a terminal (stdin **and** stdout are a TTY) the last command opens a text-only picker: it reports
-the OS, lists what is already installed with version and path, explains both methods, and asks which
-one to use. Piped, in cron, in CI, or with `--backend`/`--no-input` given, no question is asked and
-the vendor installers stay the default — so old invocations behave exactly as before.
+`--fix-path` writes the agent PATH block to `~/.profile`, an existing `~/.bash_profile`, and the
+zsh login profile when zsh is detected (`${ZDOTDIR:-$HOME}/.zprofile`). With `--backend mise`,
+it also adds a guarded `mise activate bash` / `mise activate zsh` block. Open a new login shell
+afterward; the installer runs in a child shell and cannot change your current shell's PATH.
 
 ## Interactive walkthrough
 
@@ -209,7 +278,7 @@ non-zero exit code if anything failed.
   --upgrade        re-run the upstream installer even if the tool already works
   --only TOOLS     restrict to a comma/space list: claude,codex,opencode,gemini,amp,pi
   --skip TOOLS     exclude a comma/space list
-  --fix-path       append a guarded PATH block to ~/.profile and ~/.zprofile
+  --fix-path       persist PATH in applicable login profiles (with backups)
   --restore        put back the files edited by the last run
   --restore-list   show the recorded restore points
   --verbose        stream installer output instead of only logging it
@@ -231,41 +300,49 @@ Idempotent: tools that already answer `--version` are skipped (or upgraded with 
 
 ## Requirements
 
-- Linux or macOS, `bash` 4+ (arrays, `printf -v`), `curl` or `wget`.
-- Node.js 22.19+ **only** for Gemini (npm-only upstream) and Pi — the script checks and skips with an
-  explanation rather than trying to install Node or reach for `sudo`.
+- **Linux is the main target.** Bash 4+ and standard command-line utilities are required,
+  including `timeout`. On macOS, the stock Bash 3.2 is too old; provide modern Bash and a
+  `timeout` command before running. The gate below targets Linux.
+- **Downloads:** curl or wget for local-script runs; the one-liner specifically requires curl.
+- **Node/npm:** the vendor path checks Node >= 20 for Gemini and Node >= 22.19 for Pi. npm
+  fallbacks also need Node/npm; the required version can depend on the downloaded package.
+  The script does not provision Node.
+- **mise:** required for explicit `--backend mise` runs. The interactive picker can offer to
+  install it; Gemini and Amp use npm-based mise specs and need Node/npm available.
+- **Network:** HTTPS access to vendor installers, package registries, and release hosts.
+- **Writable user directories:** installations, optional profile edits, and configuration backups
+  need space in your home directory.
 - Not root: the script refuses to run as `root` because every installer writes into `$HOME`.
 
 ## Exit codes
 
 | Code | Meaning |
 |---|---|
-| `0` | every requested harness is installed and answers `--version` (or `--check` found them all) |
+| `0` | requested operation succeeded; install/check verification passed, or a dry run/help/restore completed |
 | `1` | at least one harness failed, or `--check` found a missing harness |
 | `2` | usage error (unknown flag, unknown tool name, missing curl/wget, running as root) |
 
-## Why the installers don't hang
+## How headless installs work
 
-Upstream installers branch on whether stdout is a terminal. Give them a pipe or a bogus `TERM` and
-they either hang waiting on `/dev/tty` or silently pick the wrong path. This script sidesteps the
-whole class of problems:
+Upstream installers can change their behavior when they detect a terminal. The script reduces
+interactive prompts with a consistent execution environment:
 
 - each installer is **downloaded to a temp file first**, then executed as
-  `setsid -w CMD </dev/null >>log 2>&1` — its own session, no controlling terminal, stdin at EOF,
-  so the `[ -t 1 ]` checks land on the non-interactive branch;
+  `setsid -w CMD </dev/null >>log 2>&1` when `setsid` is available — its own session, no
+  controlling terminal, stdin at EOF. Without `setsid`, stdin is still closed and output logged;
 - `CI=1`, `CODEX_NON_INTERACTIVE=1`, `npm_config_yes=true`, `npm_config_fund/audit=false` and
   `DEBIAN_FRONTEND=noninteractive` are exported for children;
 - the installer's `--no-modify-path` / `--prefix` style flags are used where they exist, and PATH is
   rebuilt and re-exported after each install instead of relying on a login shell;
-- **nothing escalates**: no `sudo`, no `apt`, no writes outside `$HOME` (Pi's installer would
-  otherwise try to `apt install nodejs` when Node is too old — this script pre-checks the version
-  and skips instead);
+- **no automatic system package installation**: the script does not invoke sudo or apt. It
+  checks Pi's Node prerequisite before running its upstream installer;
 - dangling `~/.local/bin/<tool>` and `~/bin/<tool>` symlinks left by an older npm or git install are
   pruned before installing, because they make "installer succeeded" look truthful while
   `command -v` resolves to nothing.
 
 Failure output is the last 25 lines of the log, with the full log kept under
-`/tmp/agent-harnesses-<timestamp>/`.
+`$TMPDIR/agent-harnesses-<timestamp>.<random>/` (under `/tmp` when `TMPDIR` is unset).
+Upstream install processes have no overall timeout; the version and help probes do.
 
 ## Authentication (headless)
 
@@ -278,28 +355,30 @@ commands; the short version:
 | Claude Code | `claude setup-token` → `export CLAUDE_CODE_OAUTH_TOKEN=…` | long-lived token created from a browser session on another machine; `ANTHROPIC_API_KEY` also works |
 | Codex CLI | `codex login --device-auth` | device-code flow: prints a URL + code, paste it into any browser; or use `OPENAI_API_KEY` |
 | OpenCode | `opencode auth login` (paste an API key) | providers live in `~/.local/share/opencode/auth.json`; provider env vars also work |
-| Gemini CLI | `gemini` then `/auth`, or `GEMINI_API_KEY` | upstream is deprecated in favour of Antigravity CLI (June 2026); still functional |
+| Gemini CLI | `GEMINI_API_KEY`, or the CLI's authentication settings | use the API-key route for a browserless server |
 | Amp | `export AMP_API_KEY=…` | **no device-code flow.** The value must be an access token from `ampcode.com/settings/security`; `amp login` is a browser-callback flow and cannot complete headless. Check with `amp account list` (there is no `whoami`) |
 | Pi | `pi` interactive login, or provider env vars | subscriptions (`~/.pi/agent/auth.json`) need a browser/device step; API keys via env are the headless route |
 
 Keep secrets in a `600` file sourced from your profile (e.g. `~/.config/agent-env.sh`), not inline in
-shell history. `--check` and the summary treat a tool as credentialed only when its credential file
-is non-empty **or** the matching env var is set — `{}` counts as absent.
+shell history. `--check` and the summary look for credential content or a matching environment variable; `{}`
+counts as absent. This is a local heuristic, **not a request to the provider**: it cannot prove
+that a token is valid, a subscription is active, or the selected model is available. Run a small
+agent request after login to verify access (normal provider usage charges may apply).
 
 ## Troubleshooting
 
 | Symptom | Cause / fix |
 |---|---|
-| Installer seems to hang | something is still waiting on a TTY. Run with `--verbose`, then read the log in `/tmp/agent-harnesses-*`. Every installer runs under `timeout`, so a hang surfaces as a failure with a log tail instead of a stuck terminal |
+| Installer seems to hang | read the log in the printed log directory. Version/help probes have timeouts; upstream install processes have no overall timeout. Interrupt with Ctrl-C if needed; the script forwards termination to the active installer |
 | `installer reported success but <bin> is not runnable` | usually a dangling shim: `command -v <bin>; ls -l "$(command -v <bin>)"`. Re-run the script — it prunes dangling links before installing |
-| Version reported is a `mise` warning | fixed: `verify_bin` drops stderr and strips ANSI/CR, and prefers the real binary over a shim |
-| `gemini` / `pi` skipped | no `node`/`npm`, or Node < 22.19. Install Node yourself (no sudo here by design) or point npm's prefix at `~/.local` |
-| New shell doesn't see a tool | run `--fix-path` (guarded block in `~/.profile` **and** `~/.zprofile`, since zsh login shells skip `.profile`) or source the profile |
+| Wrong version or unexpected binary | compare `command -v <tool>` with `mise ls -g` and the executable locations printed by the installer. Remove the duplicate through its owning installer |
+| Gemini or Pi fails its Node prerequisite | Gemini checks Node >= 20; Pi checks >= 22.19. Install a suitable Node runtime and npm, then rerun with `--only gemini` or `--only pi` |
+| New shell does not see a tool | rerun with `--fix-path` and the same backend, then open a login shell. Check `command -v <tool>` and the printed executable locations |
 | The brew fallback fires in a container | it is the last resort for Gemini only; if Homebrew exists but its registry is unreachable, `--skip gemini` and install via npm |
 
 ## Reversibility
 
-Nothing is edited in place. Before the script appends a PATH block to `~/.profile` / `~/.zprofile`,
+Configuration edits are backed up first. Before the script appends a PATH block to `~/.profile` / `~/.zprofile`,
 lets `mise use -g` rewrite `~/.config/mise/config.toml`, or deletes a dangling symlink, it records
 what was there:
 
@@ -327,19 +406,26 @@ what was there:
 
 ## Uninstall
 
-Everything is user-space, so removal is a `rm` (or the package manager that installed it):
+Use the package manager or installer that owns each command. Inspect its location first:
 
 ```bash
-rm -rf ~/.local/share/claude ~/.local/bin/claude     # Claude Code (native installer)
-rm -rf ~/.codex ~/.local/bin/codex                   # Codex CLI (native installer)
-rm -rf ~/.opencode ~/.local/bin/opencode             # OpenCode
-npm uninstall -g @google/gemini-cli                  # Gemini CLI
-rm -rf ~/.amp ~/.local/bin/amp                       # Amp
-rm -rf ~/.pi/agent ~/bin/pi                          # Pi
+command -v claude codex opencode gemini amp pi
+npm list -g --depth=0
+mise ls -g
 ```
 
-Remove the `# >>> agent-harnesses PATH >>>` block from `~/.profile` / `~/.zprofile` to undo
-`--fix-path` by hand — or let `--restore` do it from the backup.
+For npm installs, use `npm uninstall -g <package>` with the package from the
+[supported-agent table](#what-it-installs). For mise installs, remove the tool from the global configuration
+and use `mise uninstall <tool>` for the versions you no longer need.
+For native installs, follow the owning tool's uninstall instructions and use the printed
+executable location to identify its files.
+
+Agent directories can contain credentials, settings, and history as well as program files.
+Back up anything you need before deleting them. `--restore` only restores the configuration
+files recorded by this installer; it does not uninstall agents.
+
+To undo profile changes manually, remove the `agent-harnesses PATH` and, when present,
+`agent-harnesses mise` blocks from the affected login profiles.
 
 ## Development
 
@@ -354,67 +440,17 @@ make gate      # = ./ci/gate.sh — the canonical gate, used by CI and by ci/run
 where nothing is installed — the dry runs execute with a scrubbed `HOME`/`PATH`, so the plan is the
 same there as on a fully provisioned laptop. It covers the picker too: piped `q` / `1` / `2` answers
 must not install anything, `--no-input` must not prompt, and `--fix-path` → `--restore` must return
-the original `~/.profile` byte-for-byte. There is no build step and no runtime dependency beyond
-`bash` and `curl`/`wget` (mise is only touched by `--backend mise`, and a stub `mise` on `PATH` lets
-the gate prove the mise plan without downloading it).
+the original `~/.profile` byte-for-byte. There is no build step; runtime prerequisites are
+listed in [Requirements](#requirements). A stub `mise` on `PATH` lets the gate prove the mise
+plan without downloading it.
 
 Adding a harness means five things: an entry in `TOOL_ORDER` / `TOOL_LABEL` / `TOOL_BIN`, its
 credential path in `TOOL_CREDS` (or env var in `TOOL_ENV`), its `MISE_SPEC` (registry short name,
 or an explicit `npm:`/`aqua:` spec), an `install_<tool>()` function that prefers the vendor
 installer with an npm fallback, and a row in the table inside `print_auth_guide()`.
 
-## CI when GitHub Actions is unavailable
-
-Sometimes the workflow is valid, the repo says Actions is enabled, registration tokens are still
-issued — and nothing ever runs: every dispatch answers `HTTP 422: Actions has been disabled for this
-user`. **A self-hosted runner does not fix that.** The runner only executes jobs; if GitHub refuses to
-create the workflow run, there is no job to hand out, so the runner sits idle forever.
-
-What is *not* part of Actions is the commit status API, and that is enough to keep a real gate:
-
-```bash
-./ci/gate.sh                     # the assertions from ci.yml, no make, no Actions
-./ci/run-gate.sh --once          # fetch main -> gate in a container -> post a commit status
-./ci/run-gate.sh --loop 300      # poll every 5 minutes instead of using systemd
-```
-
-`ci/gate.sh` is the shared payload: `bash -n`, `shellcheck --severity=warning`, `--help`, both
-`--dry-run --backend {vendor,mise}` plans, the interactive picker (piped `q`/`1`/`2`, plus
-`--no-input`), a `--fix-path` → `--restore` round-trip, regressions for the audit findings (a dry
-run never bootstraps mise, `--check --upgrade`, `--only`/`--skip` typos, restore snapshotting
-created files, SIGTERM stopping the detached installer), and the usage-error rejections.
-`.github/workflows/ci.yml` and `ci/run-gate.sh` both end up running it, so the verdict is identical
-either way.
-
-`ci/run-gate.sh` is the runner stand-in. It keeps a mirror clone, gates `origin/main`'s SHA in the
-`ci/Dockerfile` image (so the box needs no `shellcheck` of its own), and posts `pending` → `success`
-/`failure` under the context `ah-gate`. The commit page shows a check dot, and the badge works:
-
-```markdown
-![gate](https://img.shields.io/github/checks-status/dazeb/agent-harness-installer/main)
-```
-
-(the path form `github/commit-status/…/main/ah-gate` 404s — that endpoint takes no context segment;
-`checks-status` is the one that renders from the posted status.)
-
-Setup on any box with docker (Debian/Ubuntu shown; 4 cores / 2 GB is plenty — the gate is bash):
-
-```bash
-sudo install -d /usr/local/lib/ah-gate /var/lib/ah-gate /var/log/ah-gate
-sudo install -m 755 ci/run-gate.sh /usr/local/bin/ah-gate
-sudo install -m 644 ci/Dockerfile /usr/local/lib/ah-gate/Dockerfile
-sudo install -m 600 deploy/ah-gate.env.example /etc/ah-gate.env   # then edit: add AH_GATE_TOKEN
-sudo install -m 644 deploy/ah-gate.service deploy/ah-gate.timer /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now ah-gate.timer
-journalctl -u ah-gate.service -n 20      # first run builds the image, then gates HEAD
-```
-
-`AH_GATE_TOKEN` is a classic PAT with `repo` (or a fine-grained token with *Commit statuses: write*).
-Without it the gate still runs and logs `PASS`/`FAIL` — you just lose the public status. Keep
-`ci.yml` in the repo: the day Actions is usable again, delete the timer and nothing else changes.
-
-Alternative if you want a CI *UI* rather than a status: mirror the repo to a forge you control
-(Gitea/Forgejo) and run `act_runner` there. That is a separate CI system, not a GitHub workaround.
+The optional external commit-status runner is documented in [CI deployment](docs/ci.md),
+including Docker, systemd, and token setup when GitHub Actions cannot schedule jobs.
 
 ## License
 
