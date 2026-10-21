@@ -882,6 +882,7 @@ bootstrap_mise() {
 
 # choose_backend — OS + installed state, method choice, upgrade question.
 choose_backend() {
+    local choice=""
     section "Environment"
     info "os:      $(os_pretty)"
     info "arch:    $(uname -m), kernel $(uname -r)"
@@ -892,19 +893,23 @@ choose_backend() {
 
     detect_installed
 
-    section "Which install method?"
-    explain_methods
-    local choice
-    while :; do
-        ask choice "Choose 1 (regular), 2 (mise) or q to quit:" "1"
-        case $choice in
-            1) BACKEND=vendor; break ;;
-            2) BACKEND=mise;   break ;;
-            q|Q) ok "nothing was changed"; exit 0 ;;
-            *) printf '    please type 1, 2 or q\n' ;;
-        esac
-    done
-    ok "method: $BACKEND"
+    if [ "$BACKEND_SET" -eq 1 ]; then
+        # --backend wins over the menu: still report state, but do not ask.
+        ok "method: $BACKEND (from --backend)"
+    else
+        section "Which install method?"
+        explain_methods
+        while :; do
+            ask choice "Choose 1 (regular), 2 (mise) or q to quit:" "1"
+            case $choice in
+                1) BACKEND=vendor; break ;;
+                2) BACKEND=mise;   break ;;
+                q|Q) ok "nothing was changed"; exit 0 ;;
+                *) printf '    please type 1, 2 or q\n' ;;
+            esac
+        done
+        ok "method: $BACKEND"
+    fi
 
     if [ "$BACKEND" = "mise" ] && ! have mise; then
         warn "mise is not on PATH"

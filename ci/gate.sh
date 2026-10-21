@@ -170,6 +170,20 @@ else
     pass "no prompt, vendor default kept"
 fi
 
+begin "--interactive + --backend: the flag wins over the menu"
+if ! printf '1\n' | "${CLEAN[@]}" ./"$SCRIPT" --interactive --backend mise --dry-run \
+        >"$WORK/pick-flag.log" 2>&1; then
+    bad "exited non-zero" "$WORK/pick-flag.log"
+elif grep -q 'Choose 1' "$WORK/pick-flag.log"; then
+    bad "menu was shown even though --backend was given" "$WORK/pick-flag.log"
+elif ! grep -q 'method: mise (from --backend)' "$WORK/pick-flag.log"; then
+    bad "--backend mise was not honored" "$WORK/pick-flag.log"
+elif ! grep -q 'would run: mise use -g claude@latest' "$WORK/pick-flag.log"; then
+    bad "no mise plan after --backend mise" "$WORK/pick-flag.log"
+else
+    pass "no menu, mise plan kept"
+fi
+
 # --- reversibility ----------------------------------------------------------
 # --fix-path edits ~/.profile, so it must copy it first and --restore must put
 # the original bytes back.
