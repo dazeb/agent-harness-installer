@@ -12,6 +12,8 @@ TimeoutStartSec=900
 Nice=10
 # The gate only needs the repo mirror, docker and its own state dir.
 ProtectSystem=strict
-ReadWritePaths=/var/lib/ah-gate /var/log/ah-gate
+# /run is read-only under ProtectSystem=strict, and the docker client needs to
+# talk to the daemon socket, so it is listed explicitly.
+ReadWritePaths=/var/lib/ah-gate /var/log/ah-gate /run/docker.sock
 PrivateTmp=yes
 NoNewPrivileges=yes
