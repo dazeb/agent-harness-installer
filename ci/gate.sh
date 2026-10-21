@@ -208,6 +208,107 @@ else
     pass "backed up, patched, restored byte-for-byte"
 fi
 
+# --- regressions found by the audit ------------------------------------------
+# Stub curl: records every call; installers it "downloads" are tiny scripts.
+CURLSTUB="$WORK/curlstub"
+mkdir -p "$CURLSTUB"
+cat >"$CURLSTUB/curl" <<STUBEOF
+#!/bin/bash
+echo "curl \$*" >>"$WORK/curl.log"
+out=""
+while [ \$# -gt 0 ]; do [ "\$1" = -o ] && { out=\$2; shift; }; shift; done
+printf '#!/bin/bash\necho \$\$ >"%s/inst.pid"\nsleep \${AH_STUB_SLEEP:-0}\n' "$WORK" >"\$out"
+STUBEOF
+chmod +x "$CURLSTUB/curl"
+
+begin "--dry-run never bootstraps mise (picker: mise + yes)"
+: >"$WORK/curl.log"
+mkdir -p "$WORK/drhome"
+if ! printf '2\ny\nn\n' | env -i "HOME=$WORK/drhome" "PATH=$CURLSTUB:/usr/bin:/bin" "SHELL=/bin/bash" \
+        ./"$SCRIPT" --interactive --dry-run --only claude >"$WORK/dry-boot.log" 2>&1; then
+    bad "dry run exited non-zero" "$WORK/dry-boot.log"
+elif [ -s "$WORK/curl.log" ]; then
+    bad "dry run downloaded something: $(head -n1 "$WORK/curl.log")" "$WORK/dry-boot.log"
+elif [ -e "$WORK/drhome/.local/bin/mise" ]; then
+    bad "dry run installed mise" "$WORK/dry-boot.log"
+else
+    pass "no download, no mise"
+fi
+
+begin "--check --upgrade reports an installed harness as ok"
+CH="$WORK/chome"
+mkdir -p "$CH/bin"
+printf '#!/bin/sh\nprintf "9.9.9\\n"\n' >"$CH/bin/claude"
+chmod +x "$CH/bin/claude"
+if ! env -i "HOME=$CH" "PATH=$CH/bin:/usr/bin:/bin" "SHELL=/bin/bash" \
+        ./"$SCRIPT" --check --upgrade --only claude --no-input >"$WORK/check-up.log" 2>&1; then
+    bad "--check --upgrade failed for a working harness" "$WORK/check-up.log"
+elif grep -q 'is missing' "$WORK/check-up.log"; then
+    bad "reported a working harness as missing" "$WORK/check-up.log"
+else
+    pass "ok, nothing reinstalled"
+fi
+
+begin "--only/--skip reject a typo next to a valid name"
+./"$SCRIPT" --only claude,clade >"$WORK/typo-only.log" 2>&1
+rc1=$?
+./"$SCRIPT" --skip gemni >"$WORK/typo-skip.log" 2>&1
+rc2=$?
+if [ "$rc1" -eq 2 ] && [ "$rc2" -eq 2 ]; then
+    pass "both exit 2"
+else
+    bad "expected exit 2 twice, got $rc1 and $rc2" "$WORK/typo-only.log"
+fi
+
+begin "--restore saves a file it deletes (created-by-run files)"
+RC="$WORK/rchome"
+mkdir -p "$RC/bin"
+cp "$RH/bin/claude" "$RC/bin/claude"
+if ! env -i "HOME=$RC" "PATH=$RC/bin:/usr/bin:/bin" "SHELL=/bin/bash" \
+        ./"$SCRIPT" --check --fix-path --only claude --no-input >"$WORK/rc-fix.log" 2>&1; then
+    bad "--fix-path run failed" "$WORK/rc-fix.log"
+else
+    printf 'LATER_EDIT\n' >>"$RC/.profile"
+    env -i "HOME=$RC" "PATH=/usr/bin:/bin" ./"$SCRIPT" --restore >"$WORK/rc-restore.log" 2>&1
+    if [ -e "$RC/.profile" ]; then
+        bad "created-by-run .profile was not removed" "$WORK/rc-restore.log"
+    elif ! grep -rqs '^LATER_EDIT$' "$RC/.local/state/agent-harnesses/backups"; then
+        bad "the deleted file's content was not saved first" "$WORK/rc-restore.log"
+    else
+        pass "removed, with its latest content saved under backups/"
+    fi
+fi
+
+begin "a stop signal kills the running installer and exits"
+SH="$WORK/sighome"
+mkdir -p "$SH"
+env -i "HOME=$SH" "TMPDIR=$WORK" "PATH=$CURLSTUB:/usr/bin:/bin" "SHELL=/bin/bash" "AH_STUB_SLEEP=47" \
+    ./"$SCRIPT" --no-input --only claude >"$WORK/sig.log" 2>&1 &
+SIGPID=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -s "$WORK/inst.pid" ] && break
+    sleep 0.5
+done
+INSTPID=$(cat "$WORK/inst.pid" 2>/dev/null || echo 0)
+kill -TERM "$SIGPID" 2>/dev/null
+GONE=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+    kill -0 "$SIGPID" 2>/dev/null || { GONE=1; break; }
+    sleep 0.5
+done
+wait "$SIGPID" 2>/dev/null
+if [ "$GONE" -eq 0 ]; then
+    kill -KILL "$SIGPID" 2>/dev/null
+    bad "installer script still running 5s after SIGTERM" "$WORK/sig.log"
+elif [ "$INSTPID" -gt 0 ] && kill -0 "$INSTPID" 2>/dev/null; then
+    kill -KILL -- "-$INSTPID" 2>/dev/null
+    bad "the detached installer survived the signal" "$WORK/sig.log"
+elif ls "$WORK"/claude-install.*.sh >/dev/null 2>&1; then
+    bad "temp installer script was left behind" "$WORK/sig.log"
+else
+    pass "installer stopped, temp script removed"
+fi
+
 # Rejections: usage errors must exit 2, not install anything.
 begin "unknown backend is rejected"
 ./"$SCRIPT" --backend not-a-backend >"$WORK/backend.log" 2>&1

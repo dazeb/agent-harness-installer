@@ -284,8 +284,9 @@ what was there:
 - `--restore-list` prints the ten most recent runs and what each one touched.
 - `--restore` restores the newest run; `--restore=<run>` a specific one. A restore snapshots the
   current file first, so **undoing a restore is itself undoable**. A file the run *created* (e.g. a
-  `~/.profile` that was absent, or a fresh `~/.config/mise/config.toml`) is removed again, and a
-  pruned dangling symlink is recreated.
+  `~/.profile` that was absent, or a fresh `~/.config/mise/config.toml`) is removed again — its
+  current content is snapshotted first — and a pruned dangling symlink is recreated. Files are
+  restored whole, so edits made after the run are replaced (they stay recoverable from the snapshot).
 - Only files are reverted. Installed binaries are additive and left alone — see
   [Uninstall](#uninstall) for those, or `mise uninstall <tool>` when mise owned the version.
 - If a file cannot be copied (read-only `$HOME`, full disk), the script skips the edit instead of
@@ -346,7 +347,9 @@ What is *not* part of Actions is the commit status API, and that is enough to ke
 
 `ci/gate.sh` is the shared payload: `bash -n`, `shellcheck --severity=warning`, `--help`, both
 `--dry-run --backend {vendor,mise}` plans, the interactive picker (piped `q`/`1`/`2`, plus
-`--no-input`), a `--fix-path` → `--restore` round-trip, and the two usage-error rejections.
+`--no-input`), a `--fix-path` → `--restore` round-trip, regressions for the audit findings (a dry
+run never bootstraps mise, `--check --upgrade`, `--only`/`--skip` typos, restore snapshotting
+created files, SIGTERM stopping the detached installer), and the usage-error rejections.
 `.github/workflows/ci.yml` and `ci/run-gate.sh` both end up running it, so the verdict is identical
 either way.
 

@@ -130,11 +130,16 @@ NO_INPUT=0         # 1 when --no-input was given
 RESTORE=0          # 1 for --restore
 RESTORE_RUN=""     # optional run id for --restore=<run>
 RESTORE_LIST=0
-VERBOSE="${VERBOSE:-}"
+VERBOSE="${AH_VERBOSE:-}"
 ONLY=""
 SKIP=""
 
-LOG_DIR="${TMPDIR:-/tmp}/agent-harnesses-$(date +%Y%m%d-%H%M%S)"
+# Created lazily by ensure_log_dir with mktemp -d (mode 0700): a predictable name
+# in a world-writable /tmp lets another user pre-create it and redirect our
+# `>>` log appends through a symlink.
+LOG_DIR=""
+CHILD_PID=""           # detached installer currently running (for the signal trap)
+CLEANUP_FILES=()       # temp installer scripts to remove on exit
 
 # Reversibility bookkeeping: every edit is copied here first.
 RUN_ID="$(date +%Y%m%d-%H%M%S)-$$"
@@ -172,6 +177,39 @@ usage() {
 # ---------------------------------------------------------------------------
 
 have() { command -v "$1" >/dev/null 2>&1; }
+
+ensure_log_dir() {
+    if [ -z "$LOG_DIR" ] || [ ! -d "$LOG_DIR" ]; then
+        LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/agent-harnesses-$(date +%Y%m%d-%H%M%S).XXXXXX") ||
+            { failmsg "could not create a log directory under ${TMPDIR:-/tmp}"; exit 1; }
+    fi
+}
+
+# Signals: installers run in their own session (setsid), so the terminal's
+# Ctrl-C never reaches them. Forward the stop to the child's process group,
+# remove temp scripts, and exit like a normal interrupted command.
+cleanup_files() {
+    local f
+    for f in "${CLEANUP_FILES[@]}"; do rm -f "$f"; done
+    CLEANUP_FILES=()
+}
+
+on_signal() {  # on_signal SIGNAL-NUMBER
+    trap '' INT TERM
+    printf '\n' >&2
+    warn "interrupted — stopping the running installer"
+    if [ -n "$CHILD_PID" ]; then
+        kill -TERM -- "-$CHILD_PID" 2>/dev/null || kill -TERM "$CHILD_PID" 2>/dev/null
+        sleep 1
+        kill -KILL -- "-$CHILD_PID" 2>/dev/null || kill -KILL "$CHILD_PID" 2>/dev/null
+    fi
+    cleanup_files
+    exit $((128 + $1))
+}
+
+trap cleanup_files EXIT
+trap 'on_signal 2' INT
+trap 'on_signal 15' TERM
 
 # ---------------------------------------------------------------------------
 # Reversibility: backups + manifest (--restore)
@@ -248,7 +286,9 @@ restore_run() {  # restore_run [RUN_ID] — default: newest run in the manifest
     # 1) snapshot what is on disk now, so this restore can be undone too
     while IFS=$'\t' read -r _ r kind orig bak; do
         [ "$r" = "$run" ] || continue
-        [ "$kind" = "file" ] || continue
+        # "absent" entries are files the run created; restore deletes them, so
+        # whatever is there now (possibly edited since) must be saved first.
+        [ "$kind" = "file" ] || [ "$kind" = "absent" ] || continue
         [ -f "$orig" ] || continue
         snapshot="$BACKUP_DIR/${orig#"$HOME"/}"
         mkdir -p "$(dirname "$snapshot")" && cp -p "$orig" "$snapshot" &&
@@ -287,6 +327,8 @@ restore_run() {  # restore_run [RUN_ID] — default: newest run in the manifest
         return 1
     fi
     ok "$n item(s) restored — back to the pre-run state"
+    info "files were restored whole: edits made to them after the run are gone,"
+    info "but their previous content is saved in $BACKUP_DIR (undo: --restore)"
     info "installed binaries are additive and stay in place; to remove them too:"
     info "  rm -rf ~/.local/bin/<tool> ~/.local/share/claude ~/.opencode/bin ..."
     info "  mise uninstall <tool>            (if mise owned the version)"
@@ -348,11 +390,12 @@ mise_or_missing() {
 download() {
     local url=$1 dest=$2
     if have curl; then
-        curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 15 \
+        curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 \
+             --retry 3 --retry-delay 2 --connect-timeout 15 \
              --max-time 900 "$url" -o "$dest" && return 0
     fi
     if have wget; then
-        wget -q --tries=3 --timeout=60 "$url" -O "$dest" && return 0
+        wget -q --https-only --tries=3 --timeout=60 "$url" -O "$dest" && return 0
     fi
     return 1
 }
@@ -371,12 +414,19 @@ installer_interp() {
 # run_detached LOGFILE CMD... — run with no controlling terminal.
 # This is the core of headless safety: without /dev/tty no prompt can block.
 run_detached() {
-    local log=$1; shift
+    local log=$1 rc; shift
+    # Backgrounded + `wait` so a trapped signal runs the handler at once instead
+    # of after the installer finishes; setsid makes CHILD_PID the group leader.
     if have setsid; then
-        setsid -w "$@" </dev/null >>"$log" 2>&1
+        setsid -w "$@" </dev/null >>"$log" 2>&1 &
     else
-        "$@" </dev/null >>"$log" 2>&1
+        "$@" </dev/null >>"$log" 2>&1 &
     fi
+    CHILD_PID=$!
+    wait "$CHILD_PID"
+    rc=$?
+    CHILD_PID=""
+    return "$rc"
 }
 
 show_log_tail() {
@@ -391,9 +441,10 @@ show_log_tail() {
 run_upstream_installer() {
     local name=$1 url=$2; shift 2
     local script log interp rc
-    mkdir -p "$LOG_DIR"
+    ensure_log_dir
     log="$LOG_DIR/$name-install.log"
     script=$(mktemp "${TMPDIR:-/tmp}/${name}-install.XXXXXX.sh") || return 1
+    CLEANUP_FILES+=("$script")
 
     info "download $url"
     download "$url" "$script"
@@ -422,11 +473,19 @@ run_upstream_installer() {
 npm_global_install() {
     local pkg=$1; shift
     local log slug rc
-    mkdir -p "$LOG_DIR"
+    ensure_log_dir
     slug=$(printf '%s' "$pkg" | tr '/@' '__')
     log="$LOG_DIR/npm-$slug.log"
+    local prefix_args=() gp
+    gp=$(npm prefix -g 2>/dev/null)
+    if [ -n "$gp" ] && [ ! -w "$gp" ]; then
+        # System Node (apt, /usr/local): the global prefix is root-owned. Install
+        # into ~/.local instead of failing with EACCES; ~/.local/bin is on PATH.
+        prefix_args=(--prefix "$HOME/.local")
+        info "npm global prefix $gp is not writable; using $HOME/.local"
+    fi
     info "npm install -g $pkg $*"
-    run_detached "$log" npm install -g "$pkg" "$@" \
+    run_detached "$log" npm install -g "$pkg" "$@" ${prefix_args[@]+"${prefix_args[@]}"} \
         --no-audit --no-fund --loglevel=error
     rc=$?
     if [ "$rc" -ne 0 ]; then
@@ -495,7 +554,11 @@ install_opencode() {
 
 install_gemini() {
     # Gemini CLI is npm-only on Linux besides Homebrew; no standalone installer.
-    if have npm; then
+    local nv
+    nv=$(node_version)
+    if [ -n "$nv" ] && ! version_ge "$nv" "20.0.0"; then
+        warn "Gemini CLI needs Node >= 20 (found $nv); skipping npm"
+    elif have npm; then
         if npm_global_install @google/gemini-cli; then
             METHOD[gemini]="npm (@google/gemini-cli)"
             return 0
@@ -503,7 +566,7 @@ install_gemini() {
     fi
     if have brew; then
         warn "npm install failed, falling back to Homebrew"
-        mkdir -p "$LOG_DIR"
+        ensure_log_dir
         if run_detached "$LOG_DIR/gemini-brew.log" brew install gemini-cli; then
             METHOD[gemini]="homebrew (gemini-cli)"
             return 0
@@ -572,7 +635,7 @@ mise_which() {
 
 install_via_mise() {
     local tool=$1 spec=${MISE_SPEC[$1]} log rc
-    mkdir -p "$LOG_DIR"
+    ensure_log_dir
     log="$LOG_DIR/mise-$tool.log"
 
     if ! have mise; then
@@ -618,7 +681,7 @@ backend_install() {
 
 # verify_bin CMD -> echoes a version string; non-zero when the binary is dead.
 verify_bin() {
-    local cmd=$1 out
+    local cmd=$1 out flag
     for flag in --version -v; do
         # stderr is dropped on purpose: shims (mise) print warnings there and
         # they would otherwise be mistaken for the version string.
@@ -647,10 +710,7 @@ installed_ok() {
         [ "$BACKEND" = "mise" ] || return 1
         cmd=$(mise_which "$bin") || return 1
     fi
-    case "$tool" in
-        claude)   timeout 120 "$cmd" --version </dev/null >/dev/null 2>&1 ;;
-        *)        timeout 60 "$cmd" --version </dev/null >/dev/null 2>&1 ;;
-    esac
+    timeout 120 "$cmd" --version </dev/null >/dev/null 2>&1
 }
 
 # resolve_cmd TOOL — command used for verification. Under --backend mise the
@@ -680,9 +740,19 @@ is_selected() {
 
 PATH_DIRS=("$HOME/.local/bin" "$HOME/.opencode/bin" "$HOME/.amp/bin" "$HOME/.pi/agent/bin")
 
+# npm's global bin dir, when it lives under $HOME (nvm, ~/.npm-global, ...):
+# a user-prefix `npm install -g` lands there, not in a fixed PATH_DIRS entry.
+npm_user_bin() {
+    local gp
+    have npm || return 0
+    gp=$(npm prefix -g 2>/dev/null) || return 0
+    case $gp in "$HOME"/*) printf '%s/bin' "$gp" ;; esac
+}
+
 build_path() {
-    local d out="" IFS=:
-    for d in "${PATH_DIRS[@]}" $PATH; do
+    local d out="" IFS=: nb
+    nb=$(npm_user_bin)
+    for d in "${PATH_DIRS[@]}" ${nb:+"$nb"} $PATH; do
         [ -n "$d" ] && [ -d "$d" ] || continue
         case ":$out:" in *":$d:"*) continue ;; esac
         out="$out:$d"
@@ -707,6 +777,10 @@ refresh_path() {
 
 persist_path() {
     local targets=("$HOME/.profile") t shellname=bash
+    # bash login shells read ~/.bash_profile INSTEAD of ~/.profile when it exists.
+    if [ -f "$HOME/.bash_profile" ]; then
+        targets+=("$HOME/.bash_profile")
+    fi
     # zsh login shells read .zprofile, not .profile.
     if [ -n "${ZSH_VERSION:-}" ] || [ "$(basename "${SHELL:-}")" = "zsh" ]; then
         targets+=("${ZDOTDIR:-$HOME}/.zprofile")
@@ -859,15 +933,22 @@ detect_installed() {
 # Install mise itself from https://mise.run — user-space, no sudo; the only
 # file it adds is ~/.local/bin/mise.
 bootstrap_mise() {
-    local log="$LOG_DIR/mise-bootstrap.log" rc
-    if ! have curl; then
-        failmsg "curl is required to install mise"
+    local log script rc
+    ensure_log_dir
+    log="$LOG_DIR/mise-bootstrap.log"
+    # Download first, then execute (same as the harness installers): a pipe would
+    # run a truncated script if the connection dropped mid-transfer.
+    script=$(mktemp "${TMPDIR:-/tmp}/mise-install.XXXXXX.sh") || return 1
+    CLEANUP_FILES+=("$script")
+    info "download https://mise.run"
+    if ! download https://mise.run "$script" || [ ! -s "$script" ]; then
+        rm -f "$script"
+        failmsg "could not download https://mise.run (need curl or wget)"
         return 1
     fi
-    mkdir -p "$LOG_DIR"
-    info "download https://mise.run"
-    run_detached "$log" sh -c 'curl -fsSL https://mise.run | sh'
+    run_detached "$log" sh "$script"
     rc=$?
+    rm -f "$script"
     hash -r 2>/dev/null || true
     refresh_path
     if [ "$rc" -eq 0 ] && have mise; then
@@ -913,7 +994,9 @@ choose_backend() {
 
     if [ "$BACKEND" = "mise" ] && ! have mise; then
         warn "mise is not on PATH"
-        if ask_yes_no "Install mise now (curl https://mise.run | sh, user-space)?" y; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+            info "dry run: would offer to install mise (https://mise.run); not installing"
+        elif ask_yes_no "Install mise now (downloads and runs https://mise.run, user-space)?" y; then
             if ! bootstrap_mise; then
                 BACKEND=vendor
                 warn "falling back to the regular installers"
@@ -1084,11 +1167,7 @@ print_summary() {
             planned) printf -v cell '%s%-8s%s' "$C_BLUE"  "planned" "$C_RESET" ;;
             *)       printf -v cell '%s%-8s%s' "$C_DIM"   "skipped" "$C_RESET" ;;
         esac
-        if [ -f "${TOOL_CREDS[$tool]}" ] || [ -n "${TOOL_ENV[$tool]}" ]; then
-            creds=$(has_creds "$tool")
-        else
-            creds="?"
-        fi
+        creds=$(has_creds "$tool")
         printf '    %-9s %-30s %b%s\n' "$tool" "$ver" "$cell" "$creds"
     done
 
@@ -1145,17 +1224,20 @@ main() {
         *) failmsg "--backend must be 'vendor' or 'mise' (got: ${BACKEND:-empty})"; exit 2 ;;
     esac
 
-    # Reject typos instead of silently doing nothing.
-    if [ -n "$ONLY" ]; then
-        local t known=0
-        for t in "${TOOL_ORDER[@]}"; do
-            case ",$ONLY," in *",$t,"*) known=1 ;; esac
+    # Reject typos instead of silently ignoring them: every name must be known.
+    local list name t known
+    for list in ONLY SKIP; do
+        for name in $(printf '%s' "${!list}" | tr ',' ' '); do
+            known=0
+            for t in "${TOOL_ORDER[@]}"; do
+                [ "$name" = "$t" ] && known=1
+            done
+            if [ "$known" -eq 0 ]; then
+                failmsg "--${list,,}: unknown harness '$name' (known: ${TOOL_ORDER[*]})"
+                exit 2
+            fi
         done
-        if [ "$known" -eq 0 ]; then
-            failmsg "--only '$ONLY' matches none of: ${TOOL_ORDER[*]}"
-            exit 2
-        fi
-    fi
+    done
 
     if [ "$(id -u)" -eq 0 ]; then
         failmsg "do not run this as root — every harness installs into \$HOME"
@@ -1179,6 +1261,7 @@ main() {
     info "user:    $(id -un) (uid $(id -u), shell ${SHELL:-unknown})"
     info "node:    $(node_or_missing)"
     info "npm:     $(npm -v 2>/dev/null || echo missing)"
+    ensure_log_dir
     info "log dir: $LOG_DIR"
 
     if [ "$CHECK_ONLY" -eq 0 ] && ! have curl && ! have wget; then
@@ -1194,8 +1277,8 @@ main() {
     export npm_config_fund=false
     export npm_config_audit=false
 
-    ensure_bin_dir
-    mkdir -p "$LOG_DIR"
+    # --check is read-only: do not create ~/.local/bin for it.
+    [ "$CHECK_ONLY" -eq 1 ] || ensure_bin_dir
     refresh_path
 
     # Interactive by default when a human is at the keyboard, unless the method
@@ -1229,7 +1312,8 @@ main() {
         section "${TOOL_LABEL[$tool]}"
 
         if installed_ok "$tool"; then
-            if [ "$UPGRADE" -eq 0 ]; then
+            # --check never upgrades: an installed, runnable tool is simply ok.
+            if [ "$UPGRADE" -eq 0 ] || [ "$CHECK_ONLY" -eq 1 ]; then
                 VERSION[$tool]=$(verify_bin "$(resolve_cmd "$tool")" || printf 'installed')
                 ok "$bin — ${VERSION[$tool]} (already installed; --upgrade to refresh)"
                 STATUS[$tool]="ok"
