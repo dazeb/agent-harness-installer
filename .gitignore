@@ -1,0 +1,7 @@
+# installer logs written by the script
+*.log
+agent-harnesses-*/
+
+# editor / OS noise
+.DS_Store
+*.swp

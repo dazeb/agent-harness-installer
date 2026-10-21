@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    name: lint and smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bash syntax
+        run: bash -n install-agent-harnesses.sh
+
+      - name: ShellCheck (warnings are failures)
+        run: shellcheck --severity=warning --format=gcc install-agent-harnesses.sh
+
+      - name: --help works
+        run: ./install-agent-harnesses.sh --help
+
+      - name: --dry-run plans without installing
+        run: |
+          ./install-agent-harnesses.sh --dry-run | tee dry.log
+          grep -q 'dry run complete' dry.log
+
+      - name: Unknown tool name is rejected
+        run: |
+          if ./install-agent-harnesses.sh --only not-a-tool; then
+            echo "expected a non-zero exit for an unknown tool name" >&2
+            exit 1
+          fi
+
+      - name: Refuses to run as root
+        run: |
+          if sudo -E ./install-agent-harnesses.sh --check; then
+            echo "expected a non-zero exit when run as root" >&2
+            exit 1
+          fi
